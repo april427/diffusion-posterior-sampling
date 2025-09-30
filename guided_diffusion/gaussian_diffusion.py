@@ -237,6 +237,32 @@ class GaussianDiffusion:
             return t.float() * (1000.0 / self.num_timesteps)
         return t
 
+    def training_losses(self, model, x_start, t):
+        """
+        Compute training losses for the diffusion model.
+
+        :param model: The model to evaluate.
+        :param x_start: The starting data (ground truth).
+        :param t: The timestep tensor.
+        :return: A dictionary of losses.
+        """
+        noise = torch.randn_like(x_start)
+        
+        sqrt_alphas_cumprod_t = _extract_into_tensor(
+            self.sqrt_alphas_cumprod, t, x_start.shape
+        )
+        sqrt_one_minus_alphas_cumprod_t = _extract_into_tensor(
+            self.sqrt_one_minus_alphas_cumprod, t, x_start.shape
+        )
+
+        x_noisy = sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod_t * noise
+        
+        model_output = model(x_noisy, t)
+        
+        # Mean squared error loss between predicted noise and true noise
+        mse_loss = torch.mean((model_output - noise) ** 2)
+        
+        return {"mse_loss": mse_loss}
 def space_timesteps(num_timesteps, section_counts):
     """
     Create a list of timesteps to use from an original diffusion process,

@@ -1,0 +1,31 @@
+# Dataset configurations
+train_dataset:
+  name: 'small_test'  # Small dataset for overfitting test
+  root: 'data/samples'  # Using the sample images in the project
+  transforms: True
+
+val_dataset:
+  name: 'small_test'
+  root: 'data/samples'  # Using the same images for validation during testing
+  transforms: True
+
+# Training parameters
+batch_size: 2  # Small batch size for small dataset
+num_workers: 2  # Reduced workers for small dataset
+epochs: 500    # Increased epochs for overfitting test
+
+# Optimizer settings
+optimizer:
+  lr: 0.0002  # Learning rate
+  beta1: 0.9
+  beta2: 0.999
+
+# Training schedule
+log_interval: 100  # How often to log training progress
+val_interval: 5    # How often to run validation
+save_interval: 10  # How often to save checkpoints
+
+# Paths
+log_dir: 'runs/diffusion_train'
+checkpoint_dir: 'checkpoints/diffusion'
+resume_checkpoint: null  # Path to checkpoint if resuming training
