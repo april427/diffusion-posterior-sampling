@@ -1,31 +1,42 @@
 # Dataset configurations
 train_dataset:
-  name: 'small_test'  # Small dataset for overfitting test
-  root: 'data/samples'  # Using the sample images in the project
-  transforms: True
+  name: 'aoa_amp'
+  root: './data/aoa_amp_cache'
+  grid_resolution: 1.5625
+  num_bs: 1
+  bs_range: [-40, 40]
+  wavelength: 0.1
+  num_samples: 1000
+  cache_data: True
 
 val_dataset:
-  name: 'small_test'
-  root: 'data/samples'  # Using the same images for validation during testing
-  transforms: True
+  name: 'aoa_amp'
+  root: './data/aoa_amp_cache'
+  grid_resolution: 1.5625
+  num_bs: 1
+  bs_range: [-40, 40]
+  wavelength: 0.1
+  num_samples: 128
+  cache_data: True
 
 # Training parameters
-batch_size: 2  # Small batch size for small dataset
-num_workers: 2  # Reduced workers for small dataset
-epochs: 500    # Increased epochs for overfitting test
+batch_size: 16
+num_workers: 4
+epochs: 200
+data_channels: 2
 
 # Optimizer settings
 optimizer:
-  lr: 0.0002  # Learning rate
+  lr: 0.0001
   beta1: 0.9
   beta2: 0.999
 
 # Training schedule
-log_interval: 100  # How often to log training progress
-val_interval: 5    # How often to run validation
-save_interval: 10  # How often to save checkpoints
+log_interval: 100
+val_interval: 5
+save_interval: 10
 
 # Paths
-log_dir: 'runs/diffusion_train'
-checkpoint_dir: 'checkpoints/diffusion'
-resume_checkpoint: null  # Path to checkpoint if resuming training
+log_dir: './logs/aoa_amp_dps'
+checkpoint_dir: './checkpoints/aoa_amp_dps'
+resume_checkpoint: null

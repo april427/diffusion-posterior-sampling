@@ -258,7 +258,10 @@ class GaussianDiffusion:
         x_noisy = sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod_t * noise
         
         model_output = model(x_noisy, t)
-        
+
+        if model_output.shape[1] == 2 * x_start.shape[1]:
+            model_output, _ = torch.split(model_output, x_start.shape[1], dim=1)
+
         # Mean squared error loss between predicted noise and true noise
         mse_loss = torch.mean((model_output - noise) ** 2)
         

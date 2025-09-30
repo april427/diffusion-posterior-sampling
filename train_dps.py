@@ -10,6 +10,7 @@ from guided_diffusion.gaussian_diffusion import create_sampler
 from guided_diffusion.measurements import get_operator
 from guided_diffusion.condition_methods import get_conditioning_method
 from data import get_dataset, get_dataloader, SmallTestDataset
+from data.aoa_amp_dataset import AoAAmpDataset  # noqa: F401 registers dataset
 from util.logger import get_logger
 
 def load_yaml(file_path: str) -> dict:
@@ -37,7 +38,58 @@ def main():
     logger = get_logger()
     
     # Create model
-    model = create_model(**model_config)
+    extra_keys = {
+        'batch_size',
+        'learning_rate',
+        'num_epochs',
+        'save_interval',
+        'log_interval',
+        'dataset',
+        'dataloader',
+        'data_channels',
+    }
+    model_params = {k: v for k, v in model_config.items() if k not in extra_keys}
+    model = create_model(**model_params)
+
+    # Adjust input/output layers when working with multi-channel AoA/Amp data
+    data_channels = model_config.get('data_channels')
+    if data_channels is None:
+        data_channels = train_config.get('data_channels')
+    if data_channels is None:
+        train_dataset_cfg = train_config.get('train_dataset', {})
+        if train_dataset_cfg.get('name') == 'aoa_amp':
+            num_bs = train_dataset_cfg.get('num_bs', 1)
+            num_bs = int(num_bs) if num_bs is not None else 1
+            data_channels = 2 * num_bs
+
+    if data_channels is None:
+        data_channels = 3
+    else:
+        data_channels = int(data_channels)
+
+    if data_channels != 3:
+        old_input_layer = model.input_blocks[0][0]
+        model.input_blocks[0][0] = torch.nn.Conv2d(
+            in_channels=data_channels,
+            out_channels=old_input_layer.out_channels,
+            kernel_size=old_input_layer.kernel_size,
+            stride=old_input_layer.stride,
+            padding=old_input_layer.padding,
+            bias=old_input_layer.bias is not None
+        )
+
+        old_output_layer = model.out[-1]
+        learn_sigma = model_config.get('learn_sigma', False)
+        expected_out_channels = data_channels * 2 if learn_sigma else data_channels
+        model.out[-1] = torch.nn.Conv2d(
+            in_channels=old_output_layer.in_channels,
+            out_channels=expected_out_channels,
+            kernel_size=old_output_layer.kernel_size,
+            stride=old_output_layer.stride,
+            padding=old_output_layer.padding,
+            bias=old_output_layer.bias is not None
+        )
+
     model = model.to(device)
     
     # Create optimizer
