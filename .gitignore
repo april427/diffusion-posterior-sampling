@@ -4,4 +4,6 @@ venv/
 
 .DS_Store
 
-
+checkpoints/
+logs/
+data/
