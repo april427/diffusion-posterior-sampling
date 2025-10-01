@@ -3,6 +3,7 @@ from functools import partial
 import os
 import argparse
 import yaml
+from typing import Optional, Sequence, Tuple
 
 import torch
 import torchvision.transforms as transforms
@@ -25,7 +26,16 @@ def load_yaml(file_path: str) -> dict:
     return config
 
 
-def save_tensor_channels(tensor, out_dir: str, base_name: str, cmap: str = 'viridis'):
+def save_tensor_channels(
+    tensor,
+    out_dir: str,
+    base_name: str,
+    cmap: str = 'viridis',
+    normalize: bool = True,
+    channel_multipliers: Optional[Sequence[float]] = None,
+    channel_value_ranges: Optional[Sequence[Tuple[float, float]]] = None,
+    channel_cmaps: Optional[Sequence[str]] = None,
+):
     data = tensor.detach().cpu().clone()
     if data.ndim == 4:
         data = data.squeeze(0)
@@ -35,9 +45,25 @@ def save_tensor_channels(tensor, out_dir: str, base_name: str, cmap: str = 'viri
     os.makedirs(out_dir, exist_ok=True)
     for idx in range(data.shape[0]):
         channel = data[idx].numpy()
-        img = normalize_np(channel)
+
+        if channel_multipliers is not None and idx < len(channel_multipliers):
+            channel = channel * channel_multipliers[idx]
+
         channel_name = os.path.join(out_dir, f"{base_name}_channel{idx + 1}.png")
-        plt.imsave(channel_name, img, cmap=cmap)
+        current_cmap = cmap
+        if channel_cmaps is not None and idx < len(channel_cmaps) and channel_cmaps[idx]:
+            current_cmap = channel_cmaps[idx]
+
+        if normalize:
+            img = normalize_np(channel)
+            plt.imsave(channel_name, img, cmap=current_cmap)
+        else:
+            kwargs = {}
+            if channel_value_ranges is not None and idx < len(channel_value_ranges):
+                vmin, vmax = channel_value_ranges[idx]
+                kwargs['vmin'] = vmin
+                kwargs['vmax'] = vmax
+            plt.imsave(channel_name, channel, cmap=current_cmap, **kwargs)
 
 
 def save_tensor_npy(tensor, path: str):
@@ -337,10 +363,40 @@ def main():
         x_start = torch.randn(ref_img.shape, device=device).requires_grad_()
         sample = sample_fn(x_start=x_start, measurement=y_n, record=False, save_root=out_path)
         if is_aoa_dataset:
-            save_tensor_channels(y_n, os.path.join(out_path, 'input'), fname_base)
-            # save_tensor_channels(ref_img, os.path.join(out_path, 'label'), fname_base)
-            save_tensor_channels_denormalized(ref_img, os.path.join(out_path, 'label'), f'{fname}_label')
-            save_tensor_channels(sample, os.path.join(out_path, 'recon'), fname_base)
+            channel_ranges = [(-np.pi, np.pi), (-1.0, 1.0)]
+            channel_scales = [np.pi, 1.0]
+            channel_cmaps = ['hsv', 'viridis']
+
+            save_tensor_channels(
+                y_n,
+                os.path.join(out_path, 'input'),
+                fname_base,
+                cmap='viridis',
+                normalize=False,
+                channel_multipliers=channel_scales,
+                channel_value_ranges=channel_ranges,
+                channel_cmaps=channel_cmaps,
+            )
+            save_tensor_channels(
+                ref_img,
+                os.path.join(out_path, 'label'),
+                fname_base,
+                cmap='viridis',
+                normalize=False,
+                channel_multipliers=channel_scales,
+                channel_value_ranges=channel_ranges,
+                channel_cmaps=channel_cmaps,
+            )
+            save_tensor_channels(
+                sample,
+                os.path.join(out_path, 'recon'),
+                fname_base,
+                cmap='viridis',
+                normalize=False,
+                channel_multipliers=channel_scales,
+                channel_value_ranges=channel_ranges,
+                channel_cmaps=channel_cmaps,
+            )
 
             save_tensor_npy(y_n, os.path.join(out_path, 'input', f'{fname_base}.npy'))
             # save_tensor_npy(ref_img, os.path.join(out_path, 'label', f'{fname_base}.npy'))
