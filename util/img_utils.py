@@ -46,7 +46,22 @@ def clear_color(x):
     if torch.is_complex(x):
         x = torch.abs(x)
     x = x.detach().cpu().squeeze().numpy()
-    return normalize_np(np.transpose(x, (1, 2, 0)))
+    if x.ndim == 2:
+        arr = x
+    elif x.ndim == 3:
+        channels = x.shape[0]
+        if channels in {3, 4}:
+            arr = np.transpose(x, (1, 2, 0))
+        elif channels == 1:
+            arr = np.transpose(np.repeat(x, 3, axis=0), (1, 2, 0))
+        elif channels == 2:
+            padded = np.concatenate([x, np.zeros_like(x[:1])], axis=0)
+            arr = np.transpose(padded, (1, 2, 0))
+        else:  # more than 4 channels
+            arr = np.transpose(x[:3], (1, 2, 0))
+    else:
+        arr = x
+    return normalize_np(arr)
 
 
 def normalize_np(img):
@@ -210,9 +225,10 @@ class mask_generator:
         samples = np.random.choice(self.image_size * self.image_size, int(total * prob), replace=False)
         mask_vec[:, samples] = 0
         mask_b = mask_vec.view(1, self.image_size, self.image_size)
-        mask_b = mask_b.repeat(3, 1, 1)
+        channels = img.shape[1] if img.ndim == 4 else 3
+        mask_b = mask_b.repeat(channels, 1, 1).to(img.device)
         mask = torch.ones_like(img, device=img.device)
-        mask[:, ...] = mask_b
+        mask[:, :channels, ...] = mask_b
         return mask
 
     def __call__(self, img):
