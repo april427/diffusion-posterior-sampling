@@ -16,11 +16,11 @@ mkdir -p $LOG_DIR
 mkdir -p ./data/aoa_amp_cache
 
 # Run training
-python train_aoa_amp.py \
-    --model_config configs/aoa_amp_config.yaml \
-    --diffusion_config configs/diffusion_config.yaml \
-    --checkpoint_dir $CHECKPOINT_DIR \
-    --gpu $GPU \
-    --log_dir $LOG_DIR
+python train_dps.py \
+  --model_config configs/aoa_amp_config.yaml \
+  --diffusion_config configs/diffusion_config.yaml \
+  --train_config configs/train_dps_config.yaml \
+  --gpu 0
+
 
 echo "Training completed!"

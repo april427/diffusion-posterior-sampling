@@ -6,7 +6,7 @@ train_dataset:
   num_bs: 1
   bs_range: [-40, 40]
   wavelength: 0.1
-  num_samples: 1000
+  num_samples: 10000
   cache_data: True
 
 val_dataset:
@@ -16,7 +16,7 @@ val_dataset:
   num_bs: 1
   bs_range: [-40, 40]
   wavelength: 0.1
-  num_samples: 128
+  num_samples: 1024
   cache_data: True
 
 # Training parameters
