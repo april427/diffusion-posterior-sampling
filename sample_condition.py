@@ -44,7 +44,6 @@ def save_tensor_npy(tensor, path: str):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     np.save(path, tensor.detach().cpu().numpy())
 
-
 def save_aoa_radians(tensor, out_dir: str, base_name: str):
     if tensor.ndim < 3:
         return
@@ -52,8 +51,130 @@ def save_aoa_radians(tensor, out_dir: str, base_name: str):
     if arr.shape[1] < 1:
         return
     aoa = arr[:, 0] * np.pi
+
+
+
+def save_tensor_channels_denormalized(tensor, out_dir: str, base_name: str):
+    """
+    Save AoA/Amplitude tensor with proper denormalization and colorbars
+    """
+    import os
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from matplotlib.colors import hsv_to_rgb
+    
     os.makedirs(out_dir, exist_ok=True)
-    np.save(os.path.join(out_dir, f"{base_name}_aoa_rad.npy"), aoa)
+    
+    # Convert tensor to numpy and move to CPU
+    if hasattr(tensor, 'cpu'):
+        tensor = tensor.cpu()
+    data = tensor.numpy()
+    
+    # Handle batch dimension
+    if len(data.shape) == 4:  # [B, C, H, W]
+        data = data[0]  # Take first batch item
+    
+    # Extract channels
+    aoa_normalized = data[0]  # Normalized AoA [-1, 1]
+    amp_normalized = data[1]  # Normalized amplitude [-1, 1]
+    
+    # Denormalize to original ranges
+    aoa_original = aoa_normalized * np.pi  # [-1,1] → [-π,π] radians
+    amp_original = amp_normalized  # Keep normalized for now, or apply your specific denormalization
+    
+    # Create figure with 3 subplots
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    
+    # Determine spatial extent (assuming 100m x 100m grid)
+    extent = [-50, 50, -50, 50]
+    
+    # 1. AoA Map
+    im1 = axes[0].imshow(aoa_original, extent=extent, origin='lower', 
+                         cmap='hsv', vmin=-np.pi, vmax=np.pi)
+    axes[0].set_title('Angle of Arrival (AoA) Map')
+    axes[0].set_xlabel('X position (m)')
+    axes[0].set_ylabel('Y position (m)')
+    cbar1 = plt.colorbar(im1, ax=axes[0])
+    cbar1.set_label('AoA (radians)')
+    
+    # 2. Amplitude Map  
+    im2 = axes[1].imshow(amp_normalized, extent=extent, origin='lower', 
+                         cmap='viridis', vmin=-1, vmax=1)
+    axes[1].set_title('Amplitude Map (Normalized)')
+    axes[1].set_xlabel('X position (m)')
+    axes[1].set_ylabel('Y position (m)')
+    cbar2 = plt.colorbar(im2, ax=axes[1])
+    cbar2.set_label('Normalized Amplitude')
+    
+    # 3. Combined View (AoA as hue, amplitude as brightness)
+    aoa_norm_01 = (aoa_original + np.pi) / (2 * np.pi)  # [0, 1]
+    amp_norm_01 = (amp_normalized + 1) / 2  # [-1, 1] → [0, 1]
+    
+    hsv_img = np.zeros((*aoa_normalized.shape, 3))
+    hsv_img[:, :, 0] = aoa_norm_01  # Hue = AoA
+    hsv_img[:, :, 1] = 1.0          # Full saturation
+    hsv_img[:, :, 2] = amp_norm_01  # Value = amplitude
+    
+    rgb_img = hsv_to_rgb(hsv_img)
+    
+    axes[2].imshow(rgb_img, extent=extent, origin='lower')
+    axes[2].set_title('Combined View\n(Color=AoA, Brightness=Amplitude)')
+    axes[2].set_xlabel('X position (m)')
+    axes[2].set_ylabel('Y position (m)')
+    
+    plt.tight_layout()
+    
+    # Save the figure
+    save_path = os.path.join(out_dir, f'{base_name}_denormalized.png')
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # Also save individual channels as separate files
+    # AoA only
+    fig_aoa, ax_aoa = plt.subplots(figsize=(8, 6))
+    im_aoa = ax_aoa.imshow(aoa_original, extent=extent, origin='lower', 
+                           cmap='hsv', vmin=-np.pi, vmax=np.pi)
+    ax_aoa.set_title('Angle of Arrival (AoA)')
+    ax_aoa.set_xlabel('X position (m)')
+    ax_aoa.set_ylabel('Y position (m)')
+    cbar_aoa = plt.colorbar(im_aoa, ax=ax_aoa)
+    cbar_aoa.set_label('AoA (radians)')
+    plt.savefig(os.path.join(out_dir, f'{base_name}_aoa.png'), dpi=150, bbox_inches='tight')
+    plt.close()
+    
+    # Amplitude only
+    fig_amp, ax_amp = plt.subplots(figsize=(8, 6))
+    im_amp = ax_amp.imshow(amp_normalized, extent=extent, origin='lower', 
+                           cmap='viridis', vmin=-1, vmax=1)
+    ax_amp.set_title('Amplitude (Normalized)')
+    ax_amp.set_xlabel('X position (m)')
+    ax_amp.set_ylabel('Y position (m)')
+    cbar_amp = plt.colorbar(im_amp, ax=ax_amp)
+    cbar_amp.set_label('Normalized Amplitude')
+    plt.savefig(os.path.join(out_dir, f'{base_name}_amplitude.png'), dpi=150, bbox_inches='tight')
+    plt.close()
+
+def save_tensor_npy_denormalized(tensor, path: str):
+    """
+    Save tensor with denormalized values
+    """
+    import numpy as np
+    
+    # Convert tensor to numpy
+    if hasattr(tensor, 'cpu'):
+        tensor = tensor.cpu()
+    data = tensor.numpy()
+    
+    # Handle batch dimension
+    if len(data.shape) == 4:
+        data = data[0]
+    
+    # Denormalize AoA channel
+    if data.shape[0] >= 2:
+        data[0] = data[0] * np.pi  # AoA: [-1,1] → [-π,π]
+        # Amplitude stays normalized for now
+    
+    np.save(path, data)
 
 
 def main():
@@ -217,11 +338,13 @@ def main():
         sample = sample_fn(x_start=x_start, measurement=y_n, record=False, save_root=out_path)
         if is_aoa_dataset:
             save_tensor_channels(y_n, os.path.join(out_path, 'input'), fname_base)
-            save_tensor_channels(ref_img, os.path.join(out_path, 'label'), fname_base)
+            # save_tensor_channels(ref_img, os.path.join(out_path, 'label'), fname_base)
+            save_tensor_channels_denormalized(ref_img, os.path.join(out_path, 'label'), f'{fname}_label')
             save_tensor_channels(sample, os.path.join(out_path, 'recon'), fname_base)
 
             save_tensor_npy(y_n, os.path.join(out_path, 'input', f'{fname_base}.npy'))
-            save_tensor_npy(ref_img, os.path.join(out_path, 'label', f'{fname_base}.npy'))
+            # save_tensor_npy(ref_img, os.path.join(out_path, 'label', f'{fname_base}.npy'))
+            save_tensor_npy_denormalized(ref_img, os.path.join(out_path, 'label', f'{fname}_label.npy'))
             save_tensor_npy(sample, os.path.join(out_path, 'recon', f'{fname_base}.npy'))
 
             save_aoa_radians(y_n, os.path.join(out_path, 'input'), fname_base)
