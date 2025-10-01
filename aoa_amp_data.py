@@ -48,26 +48,27 @@ def generate_training_data(grid_resolution, bs_positions, wavelength=0.1):
     return data
 
 
-# if __name__ == "__main__":
-#     grid_resolution = 1  # Example grid resolution
-#     bs_positions = [(-20, 0)]  # Example BS positions
-#     dataset = generate_training_data(grid_resolution, bs_positions, wavelength=3e8/2.4e9)
+if __name__ == "__main__":
+    grid_resolution = 1  # Example grid resolution
+    bs_positions = [(-20, -20)]  # Example BS positions
+    dataset = generate_training_data(grid_resolution, bs_positions, wavelength=3e8/2.4e9)
     
-#     fig, axs = plt.subplots(2, len(bs_positions), figsize=(15, 6))
-#     for idx, bs in enumerate(bs_positions):
-#         aoa_map = dataset[0]['aoa_map'][f'bs_{idx}']
-#         amplitude_map = dataset[0]['amplitude_map'][f'bs_{idx}']
+    fig, axs = plt.subplots(2, len(bs_positions), figsize=(15, 6))
+    for idx, bs in enumerate(bs_positions):
+        aoa_map = dataset[0]['aoa_map'][f'bs_{idx}']
+        amplitude_map = dataset[0]['amplitude_map'][f'bs_{idx}']
 
-#         num_samples_x = int((50 - (-50)) / grid_resolution)
-#         num_samples_y = int((50 - (-50)) / grid_resolution)
+        num_samples_x = int((50 - (-50)) / grid_resolution)
+        num_samples_y = int((50 - (-50)) / grid_resolution)
 
-#         aoa_map_reshaped = aoa_map.reshape(num_samples_x, num_samples_y)
-#         amplitude_map_reshaped = amplitude_map.reshape(num_samples_x, num_samples_y)
+        aoa_map_reshaped = aoa_map.reshape(num_samples_x, num_samples_y)
+        amplitude_map_reshaped = amplitude_map.reshape(num_samples_x, num_samples_y)
 
-#         im0 = axs[0].imshow(aoa_map_reshaped, extent=[-50, 50, -50, 50], origin='lower', cmap='hsv')
-#         axs[0].set_title(f'AoA Heatmap BS {idx}')
-#         plt.colorbar(im0, ax=axs[0])
+        im0 = axs[0].imshow(aoa_map_reshaped, extent=[-50, 50, -50, 50], origin='lower', cmap='hsv')
+        axs[0].set_title(f'AoA Heatmap BS {idx}')
+        plt.colorbar(im0, ax=axs[0])
 
-#         im1 = axs[1].imshow(amplitude_map_reshaped, extent=[-50, 50, -50, 50], origin='lower', cmap='viridis')
-#         axs[1].set_title(f'Amplitude Heatmap BS {idx}')
-#         plt.colorbar(im1, ax=axs[1])
+        im1 = axs[1].imshow(amplitude_map_reshaped, extent=[-50, 50, -50, 50], origin='lower', cmap='viridis')
+        axs[1].set_title(f'Amplitude Heatmap BS {idx}')
+        plt.colorbar(im1, ax=axs[1])
+        plt.show()

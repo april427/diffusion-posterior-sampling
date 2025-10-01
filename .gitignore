@@ -8,3 +8,4 @@ checkpoints/
 logs/
 data/aoa_amp_cache/
 data_samples/
+results/

@@ -26,7 +26,7 @@ def load_yaml(file_path: str) -> dict:
 
 
 def save_tensor_channels(tensor, out_dir: str, base_name: str, cmap: str = 'viridis'):
-    data = tensor.detach().cpu()
+    data = tensor.detach().cpu().clone()
     if data.ndim == 4:
         data = data.squeeze(0)
     if data.ndim == 2:
@@ -43,6 +43,17 @@ def save_tensor_channels(tensor, out_dir: str, base_name: str, cmap: str = 'viri
 def save_tensor_npy(tensor, path: str):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     np.save(path, tensor.detach().cpu().numpy())
+
+
+def save_aoa_radians(tensor, out_dir: str, base_name: str):
+    if tensor.ndim < 3:
+        return
+    arr = tensor.detach().cpu().numpy().copy()
+    if arr.shape[1] < 1:
+        return
+    aoa = arr[:, 0] * np.pi
+    os.makedirs(out_dir, exist_ok=True)
+    np.save(os.path.join(out_dir, f"{base_name}_aoa_rad.npy"), aoa)
 
 
 def main():
@@ -212,6 +223,10 @@ def main():
             save_tensor_npy(y_n, os.path.join(out_path, 'input', f'{fname_base}.npy'))
             save_tensor_npy(ref_img, os.path.join(out_path, 'label', f'{fname_base}.npy'))
             save_tensor_npy(sample, os.path.join(out_path, 'recon', f'{fname_base}.npy'))
+
+            save_aoa_radians(y_n, os.path.join(out_path, 'input'), fname_base)
+            save_aoa_radians(ref_img, os.path.join(out_path, 'label'), fname_base)
+            save_aoa_radians(sample, os.path.join(out_path, 'recon'), fname_base)
         else:
             plt.imsave(os.path.join(out_path, 'input', fname), clear_color(y_n))
             plt.imsave(os.path.join(out_path, 'label', fname), clear_color(ref_img))
