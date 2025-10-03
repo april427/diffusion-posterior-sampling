@@ -190,6 +190,7 @@ def main():
     learning_rate = float(model_config.get('learning_rate', 1e-4))
     num_epochs = model_config.get('num_epochs', 1000)
     save_interval = model_config.get('save_interval', 5000)
+    epoch_save_interval = model_config.get('epoch_save_interval', 1)
     log_interval = model_config.get('log_interval', 100)
     
     logger.info(f"Training parameters: lr={learning_rate}, batch_size={batch_size}, epochs={num_epochs}")
@@ -302,14 +303,28 @@ def main():
         writer.add_scalar('Train/EpochLoss', avg_epoch_loss, epoch)
         logger.info(f"Epoch {epoch+1} completed. Average loss: {avg_epoch_loss:.4f}")
         
-        # Save end-of-epoch checkpoint
-        save_checkpoint(model, optimizer, step, avg_epoch_loss, args.checkpoint_dir, 
-                       f"checkpoint_epoch_{epoch+1}.pt")
-        
-        # Generate samples at end of epoch
-        sample_path = os.path.join(args.checkpoint_dir, f"samples_epoch_{epoch+1}.npy")
-        sample_and_save(model, diffusion, device, sample_path, 
-                      data_channels=data_channels, image_size=model_config['image_size'])
+        if (epoch + 1) % epoch_save_interval == 0:
+            save_checkpoint(
+                model,
+                optimizer,
+                step,
+                avg_epoch_loss,
+                args.checkpoint_dir,
+                f"checkpoint_epoch_{epoch+1}.pt"
+            )
+
+            sample_path = os.path.join(
+                args.checkpoint_dir,
+                f"samples_epoch_{epoch+1}.npy"
+            )
+            sample_and_save(
+                model,
+                diffusion,
+                device,
+                sample_path,
+                data_channels=data_channels,
+                image_size=model_config['image_size']
+            )
     
     logger.info("Training completed!")
     writer.close()

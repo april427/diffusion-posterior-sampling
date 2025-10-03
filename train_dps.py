@@ -43,6 +43,7 @@ def main():
         'learning_rate',
         'num_epochs',
         'save_interval',
+        'epoch_save_interval',
         'log_interval',
         'dataset',
         'dataloader',

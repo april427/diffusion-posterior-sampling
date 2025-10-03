@@ -28,8 +28,9 @@ data_channels: 2        # AoA + Amplitude = 2 channels (for 1 BS)
 # Training settings - will be used by training script
 batch_size: 16
 learning_rate: 0.0001
-num_epochs: 1000
+num_epochs: 200
 save_interval: 5000     # Save checkpoint every N steps
+epoch_save_interval: 10 # Save full checkpoint/samples every N epochs
 log_interval: 100       # Log every N steps
 
 # Dataset settings

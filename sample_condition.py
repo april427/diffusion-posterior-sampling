@@ -1,5 +1,6 @@
 #test
 from functools import partial
+from collections import defaultdict
 import os
 import argparse
 import yaml
@@ -74,9 +75,19 @@ def save_aoa_radians(tensor, out_dir: str, base_name: str):
     if tensor.ndim < 3:
         return
     arr = tensor.detach().cpu().numpy().copy()
-    if arr.shape[1] < 1:
+
+    if arr.ndim == 4:
+        if arr.shape[1] < 1:
+            return
+        aoa = arr[:, 0] * np.pi
+    elif arr.ndim == 3:
+        aoa = arr[0] * np.pi
+        aoa = aoa[None, ...]
+    else:
         return
-    aoa = arr[:, 0] * np.pi
+
+    os.makedirs(out_dir, exist_ok=True)
+    np.save(os.path.join(out_dir, f"{base_name}_aoa_rad.npy"), aoa)
 
 
 
@@ -201,6 +212,26 @@ def save_tensor_npy_denormalized(tensor, path: str):
         # Amplitude stays normalized for now
     
     np.save(path, data)
+
+
+def compute_nmse(reference: torch.Tensor, estimate: torch.Tensor):
+    ref = reference.detach()
+    est = estimate.detach()
+
+    mse = torch.mean((est - ref) ** 2)
+    denom = torch.mean(ref ** 2)
+    total_nmse = (mse / (denom + 1e-8)).item()
+
+    per_channel = []
+    if ref.dim() == 4:
+        for channel in range(ref.shape[1]):
+            ref_c = ref[:, channel]
+            est_c = est[:, channel]
+            mse_c = torch.mean((est_c - ref_c) ** 2)
+            denom_c = torch.mean(ref_c ** 2)
+            per_channel.append((mse_c / (denom_c + 1e-8)).item())
+
+    return total_nmse, per_channel
 
 
 def main():
@@ -337,6 +368,9 @@ def main():
         )
         
     # Do Inference
+    nmse_totals = []
+    channel_nmse_records = defaultdict(list)
+
     for i, ref_img in enumerate(loader):
         logger.info(f"Inference for image {i}")
         fname_base = str(i).zfill(5)
@@ -362,10 +396,26 @@ def main():
         # Sampling
         x_start = torch.randn(ref_img.shape, device=device).requires_grad_()
         sample = sample_fn(x_start=x_start, measurement=y_n, record=False, save_root=out_path)
+
+        total_nmse, per_channel_nmse = compute_nmse(ref_img, sample)
+        nmse_totals.append(total_nmse)
+        for idx, value in enumerate(per_channel_nmse):
+            channel_nmse_records[idx].append(value)
+
+        if per_channel_nmse:
+            nmse_msg = ", ".join(
+                f"ch{idx + 1}: {score:.4e}" for idx, score in enumerate(per_channel_nmse)
+            )
+            logger.info(
+                f"NMSE (image {i}): total {total_nmse:.4e} ({nmse_msg})"
+            )
+        else:
+            logger.info(f"NMSE (image {i}): total {total_nmse:.4e}")
+
         if is_aoa_dataset:
             channel_ranges = [(-np.pi, np.pi), (-1.0, 1.0)]
             channel_scales = [np.pi, 1.0]
-            channel_cmaps = ['hsv', 'viridis']
+            channel_cmaps = ['hsv', 'hsv']
 
             save_tensor_channels(
                 y_n,
@@ -410,6 +460,13 @@ def main():
             plt.imsave(os.path.join(out_path, 'input', fname), clear_color(y_n))
             plt.imsave(os.path.join(out_path, 'label', fname), clear_color(ref_img))
             plt.imsave(os.path.join(out_path, 'recon', fname), clear_color(sample))
+
+    if nmse_totals:
+        avg_total_nmse = sum(nmse_totals) / len(nmse_totals)
+        logger.info(f"Average NMSE over {len(nmse_totals)} samples: {avg_total_nmse:.4e}")
+        for idx, values in channel_nmse_records.items():
+            avg_channel_nmse = sum(values) / len(values)
+            logger.info(f"Average NMSE channel {idx + 1}: {avg_channel_nmse:.4e}")
 
 if __name__ == '__main__':
     main()
