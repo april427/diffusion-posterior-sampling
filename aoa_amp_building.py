@@ -196,7 +196,7 @@ class RayTracingAoAMap:
                 # Reflected paths
                 for building in self.buildings:
                     refl_point = self.calculate_reflection_point(ue_pos, building)
-                    vec_refl = ue_pos - refl_point
+                    vec_refl =  refl_point -  self.bs_pos
                     aoa_refl = np.arctan2(vec_refl[1], vec_refl[0]) * 180 / np.pi
                     dist_refl = np.linalg.norm(refl_point - self.bs_pos) + np.linalg.norm(ue_pos - refl_point)
                     paths.append((aoa_refl, self.calculate_path_loss(dist_refl, True)))
@@ -204,7 +204,7 @@ class RayTracingAoAMap:
                 # Diffracted paths
                 for building in self.buildings:
                     diff_point = self.calculate_diffraction_point(ue_pos, building)
-                    vec_diff = ue_pos - diff_point
+                    vec_diff =   diff_point - self.bs_pos
                     aoa_diff = np.arctan2(vec_diff[1], vec_diff[0]) * 180 / np.pi
                     dist_diff = np.linalg.norm(diff_point - self.bs_pos) + np.linalg.norm(ue_pos - diff_point)
                     paths.append((aoa_diff, self.calculate_path_loss(dist_diff, True) + 20))
@@ -252,6 +252,12 @@ class RayTracingAoAMap:
             for j in range(n_x):
                 ue_pos = np.array([self.X[i, j], self.Y[i, j]])
 
+                if (ue_pos == self.bs_pos).all():
+                    # Directly at BS position
+                    for k in range(num_paths):
+                        amplitude_maps[k][i, j] = -75  # UE cannot be at BS position
+                    continue
+
                 # Store all paths with their amplitudes
                 paths = []
 
@@ -284,10 +290,22 @@ class RayTracingAoAMap:
 
                 # Sort paths by amplitude (strongest first)
                 paths = sorted(paths, key=lambda x: -x[0])
-
                 # Assign strongest paths to maps
                 for k in range(min(num_paths, len(paths))):
                     amplitude_maps[k][i, j] = paths[k][0]
+
+        # Create a mask for points inside any building
+        inside_building_mask = np.zeros((n_y, n_x), dtype=bool)
+        for building in self.buildings:
+            x_min, y_min = building['x'], building['y']
+            x_max = x_min + building['width']
+            y_max = y_min + building['height']
+            inside = (self.X >= x_min) & (self.X <= x_max) & (self.Y >= y_min) & (self.Y <= y_max)
+            inside_building_mask |= inside
+
+        # Apply 20 dB penalty to all amplitudes at points inside buildings
+        for k in range(num_paths):
+            amplitude_maps[k][inside_building_mask] -= 20
 
         return amplitude_maps
     
@@ -319,7 +337,7 @@ class RayTracingAoAMap:
             ax = axes[idx]
 
             im = ax.contourf(self.X, self.Y, aoa_map, levels=20, cmap='twilight')
-            ax.contour(self.X, self.Y, aoa_map, levels=10, colors='black', 
+            ax.contour(self.X, self.Y, aoa_map, levels=10, colors='white', 
                       linewidths=0.5, alpha=0.3)
 
             # Plot buildings
@@ -345,7 +363,7 @@ class RayTracingAoAMap:
         # Plot LoS map
         ax = axes[num_paths]
         im = ax.contourf(self.X, self.Y, los_map.astype(float), levels=[0, 0.5, 1], 
-                        cmap='RdYlGn', alpha=0.6)
+                        cmap='hsv', alpha=0.6)
 
         for building in self.buildings:
             rect = Rectangle((building['x'], building['y']), 
@@ -354,7 +372,7 @@ class RayTracingAoAMap:
             ax.add_patch(rect)
 
         ax.plot(self.bs_pos[0], self.bs_pos[1], 'r*', markersize=20, 
-               label='Base Station', markeredgecolor='black', markeredgewidth=1)
+               label='Base Station', markeredgecolor='white', markeredgewidth=1)
 
         ax.set_xlabel('X (m)')
         ax.set_ylabel('Y (m)')
@@ -429,7 +447,7 @@ if __name__ == "__main__":
     rt = RayTracingAoAMap(map_size=(100, 100), grid_spacing=1)
     
     # Set base station position
-    rt.set_base_station(20, 10)
+    rt.set_base_station(20, 80)
     
     # Add building(s)
     rt.add_building(20, 20, 30, 15)

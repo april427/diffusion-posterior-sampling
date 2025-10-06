@@ -272,7 +272,7 @@ if __name__ == "__main__":
     # Configuration
     map_size = (100, 100)
     grid_spacing = 1  # UE grid spacing
-    bs_grid_spacing = 5  # BS grid spacing (every 5 meters)
+    bs_grid_spacing = 2  # BS grid spacing (every 2 meters)
     
     # Building configurations
     building_configs = [
