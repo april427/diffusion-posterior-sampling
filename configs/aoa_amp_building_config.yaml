@@ -2,7 +2,7 @@
 # This uses the ray tracing approach with fixed buildings and strongest 3 paths
 
 # Model architecture settings
-image_size: 100         # Spatial resolution (100x100 to match map size)
+image_size: 128         # Spatial resolution (100x100 to match map size)
 num_channels: 64        # Base number of channels
 num_res_blocks: 2       # Number of residual blocks per resolution
 channel_mult: "1,2,2,4"  # Channel multipliers for different resolutions
@@ -34,7 +34,7 @@ log_interval: 50        # Log every N steps
 dataset:
   name: "aoa_amp_building"
   root: "./data/building_training"
-  map_size: [100, 100]
+  map_size: [128, 128]
   grid_spacing: 1.0     # UE grid spacing (creates 100x100 grid)
   bs_grid_spacing: 5.0  # BS every 5 meters
   building_configs:

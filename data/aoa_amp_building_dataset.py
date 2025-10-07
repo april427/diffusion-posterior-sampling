@@ -10,8 +10,14 @@ from torchvision.datasets import VisionDataset
 from typing import Optional, Callable, List, Tuple
 import os
 import pickle
+import sys
 
 from data.dataloader import register_dataset
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if REPO_ROOT not in sys.path:
+    sys.path.append(REPO_ROOT)
+
 from aoa_amp_building_data import generate_building_training_data, load_training_data
 
 

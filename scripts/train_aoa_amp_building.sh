@@ -18,7 +18,7 @@ python3 train_aoa_amp_building.py \
     --checkpoint_dir ./checkpoints/aoa_amp_building \
     --log_dir ./logs/aoa_amp_building \
     --gpu 0 \
-    --generate_data
+    "$@"
 
 echo "Training completed!"
 
