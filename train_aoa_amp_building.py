@@ -184,6 +184,7 @@ def main():
     num_epochs = model_config.get('num_epochs', 500)
     save_interval = model_config.get('save_interval', 2000)
     log_interval = model_config.get('log_interval', 50)
+    epoch_save_interval = model_config.get('epoch_save_interval', 1)
     
     logger.info(f"Training parameters: lr={learning_rate}, batch_size={batch_size}, epochs={num_epochs}")
     
@@ -192,9 +193,22 @@ def main():
     image_size = model_config.get('image_size', 100)
     
     # Create model
-    model_params = {k: v for k, v in model_config.items() 
-                   if k not in ['batch_size', 'learning_rate', 'num_epochs', 'save_interval', 
-                               'log_interval', 'dataset', 'dataloader', 'data_channels']}
+    model_params = {
+        k: v
+        for k, v in model_config.items()
+        if k
+        not in [
+            'batch_size',
+            'learning_rate',
+            'num_epochs',
+            'save_interval',
+            'epoch_save_interval',
+            'log_interval',
+            'dataset',
+            'dataloader',
+            'data_channels',
+        ]
+    }
     
     model = create_model(**model_params)
     
@@ -319,13 +333,28 @@ def main():
         logger.info(f"Epoch {epoch+1} completed. Average loss: {avg_epoch_loss:.4f}")
         
         # Save end-of-epoch checkpoint
-        save_checkpoint(model, optimizer, step, avg_epoch_loss, args.checkpoint_dir, 
-                       f"checkpoint_epoch_{epoch+1}.pt")
-        
-        # Generate samples at end of epoch
-        sample_path = os.path.join(args.checkpoint_dir, f"samples_epoch_{epoch+1}.npy")
-        sample_and_save(model, diffusion, device, sample_path, 
-                      data_channels=data_channels, image_size=image_size)
+        if (epoch + 1) % epoch_save_interval == 0:
+            save_checkpoint(
+                model,
+                optimizer,
+                step,
+                avg_epoch_loss,
+                args.checkpoint_dir,
+                f"checkpoint_epoch_{epoch+1}.pt"
+            )
+
+            sample_path = os.path.join(
+                args.checkpoint_dir,
+                f"samples_epoch_{epoch+1}.npy"
+            )
+            sample_and_save(
+                model,
+                diffusion,
+                device,
+                sample_path,
+                data_channels=data_channels,
+                image_size=image_size
+            )
     
     logger.info("Training completed!")
     writer.close()

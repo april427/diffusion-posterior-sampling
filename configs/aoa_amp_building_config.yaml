@@ -15,6 +15,7 @@ resblock_updown: True
 use_checkpoint: False
 use_fp16: False
 use_new_attention_order: False
+model_path: checkpoints/aoa_amp_building/checkpoint_epoch_8.pt  # set to desired checkpoint
 
 # Data-specific settings
 class_cond: False       # No class conditioning
@@ -28,6 +29,7 @@ batch_size: 8           # Smaller batch size due to larger images and more chann
 learning_rate: 0.0001
 num_epochs: 500         # Reduced epochs for initial training
 save_interval: 2000     # Save checkpoint every N steps
+epoch_save_interval: 10 # Save full checkpoint/samples every N epochs
 log_interval: 50        # Log every N steps
 
 # Dataset settings
