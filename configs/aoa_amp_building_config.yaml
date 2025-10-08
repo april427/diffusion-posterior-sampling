@@ -35,15 +35,28 @@ log_interval: 50        # Log every N steps
 # Dataset settings
 dataset:
   name: "aoa_amp_building"
-  root: "./data/building_training"
+  root: "./data/building_training_randomized"
   map_size: [128, 128]
   grid_spacing: 1.0     # UE grid spacing (creates 100x100 grid)
   bs_grid_spacing: 5.0  # BS every 5 meters
-  building_configs:
-    - {x: 20, y: 20, width: 30, height: 15}
-    - {x: 75, y: 56, width: 25, height: 19}
+ 
+ # Randomized building configurations
+  num_building_sets: 120
+  building_distribution: [40, 40, 40]  # 40 configs each for 1, 2, 3 buildings
+  building_size_range: [[15, 35], [10, 25]]  # [[min_width, max_width], [min_height, max_height]]
+  min_building_distance: 5.0
+  seed: 42
+
   use_existing_data: True  # Use existing data if available
   normalize_data: True
+  
+# GPU optimization parameters
+  device: 'auto'  # 'cuda', 'cpu', or 'auto'
+  use_gpu_processing: True
+  batch_size: 32
+  num_workers: 8  # Adjust based on your CPU cores
+  pin_memory: True
+  prefetch_factor: 2
 
 # DataLoader settings
 dataloader:

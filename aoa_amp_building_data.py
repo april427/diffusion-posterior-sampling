@@ -24,8 +24,8 @@ def generate_building_training_data(map_size=(100, 100), grid_spacing=1, bs_grid
         Grid spacing for BS positions in meters
     building_configs : list of dict
         List of building configurations [{'x': x, 'y': y, 'width': w, 'height': h}]
-    save_dir : str
-        Directory to save the training data
+    save_dir : str or None
+        Directory to save the training data. If None, data won't be saved to disk.
     
     Returns:
     --------
@@ -40,8 +40,9 @@ def generate_building_training_data(map_size=(100, 100), grid_spacing=1, bs_grid
             {'x': 75, 'y': 56, 'width': 25, 'height': 19}
         ]
     
-    # Create save directory if it doesn't exist
-    os.makedirs(save_dir, exist_ok=True)
+    # Create save directory if it doesn't exist and save_dir is not None
+    if save_dir is not None:
+        os.makedirs(save_dir, exist_ok=True)
     
     # Generate BS positions on a grid
     bs_x_positions = np.arange(5, map_size[0]-5, bs_grid_spacing)  # Avoid edges
@@ -90,12 +91,13 @@ def generate_building_training_data(map_size=(100, 100), grid_spacing=1, bs_grid
             
             dataset.append(sample)
     
-    # Save dataset
-    dataset_file = os.path.join(save_dir, f'training_data_grid{bs_grid_spacing}.pkl')
-    with open(dataset_file, 'wb') as f:
-        pickle.dump(dataset, f)
+    # Save dataset only if save_dir is provided
+    if save_dir is not None:
+        dataset_file = os.path.join(save_dir, f'training_data_grid{bs_grid_spacing}.pkl')
+        with open(dataset_file, 'wb') as f:
+            pickle.dump(dataset, f)
+        print(f"Dataset saved to {dataset_file}")
     
-    print(f"Dataset saved to {dataset_file}")
     print(f"Total samples: {len(dataset)}")
     
     return dataset
