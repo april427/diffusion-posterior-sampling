@@ -8,7 +8,7 @@ measurement:
     name: inpainting
   mask_opt:
     mask_type: random
-    mask_prob_range: !!python/tuple [0.3, 0.7]
+    mask_prob_range: !!python/tuple [0.7, 0.8]
     image_size: 128
   noise:
     name: gaussian
@@ -16,13 +16,13 @@ measurement:
 
 data:
   name: aoa_amp_building
-  root: ./data/building_training
+  root: ./data/building_training_randomized
   map_size: [128, 128]
   grid_spacing: 1.0
   bs_grid_spacing: 2.0
-  building_configs:
-    - {x: 20, y: 20, width: 30, height: 15}
-    - {x: 75, y: 56, width: 25, height: 19}
+  # building_configs:
+  #   - {x: 20, y: 20, width: 30, height: 15}
+  #   - {x: 75, y: 56, width: 25, height: 19}
   use_existing_data: True
   normalize_data: True
   num_samples: 16

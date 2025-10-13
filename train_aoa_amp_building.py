@@ -267,12 +267,20 @@ def main():
     dataloader_config = model_config['dataloader']
     
     train_dataset = get_dataset(**dataset_config)
-    train_dataloader = get_dataloader(
-        dataset=train_dataset, 
-        batch_size=dataloader_config['batch_size'],
-        num_workers=dataloader_config['num_workers'],
-        train=True
-    )
+    # Use the dataset's custom dataloader method instead of the generic one
+    if hasattr(train_dataset, 'get_dataloader'):
+        train_dataloader = train_dataset.get_dataloader(
+            batch_size=batch_size, 
+            shuffle=True
+        )
+    else:
+        # Fallback to generic dataloader with CUDA-safe settings
+        train_dataloader = get_dataloader(
+            train_dataset, 
+            batch_size, 
+            num_workers=0,  # Force 0 workers for CUDA compatibility
+            train=True
+        )
     
     logger.info(f"Dataset size: {len(train_dataset)}")
     logger.info(f"Number of batches: {len(train_dataloader)}")

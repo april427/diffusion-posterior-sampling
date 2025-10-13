@@ -9,6 +9,40 @@ import os
 import pickle
 from aoa_amp_building import RayTracingAoAMap
 
+def _generate_single_sample(args):
+    """Worker function for parallel processing"""
+    bs_pos, map_size, grid_spacing, building_configs = args
+    bs_x, bs_y = bs_pos
+    
+    # Create ray tracing model
+    rt = RayTracingAoAMap(map_size=map_size, grid_spacing=grid_spacing)
+    
+    # Set base station position
+    rt.set_base_station(bs_x, bs_y)
+    
+    # Add buildings
+    for building in building_configs:
+        rt.add_building(building['x'], building['y'], 
+                      building['width'], building['height'])
+    
+    # Generate AoA and amplitude maps for 3 strongest paths
+    aoa_maps, los_map = rt.generate_aoa_map(num_paths=3)
+    amplitude_maps = rt.generate_amplitude_map(num_paths=3)
+    
+    # Store sample
+    sample = {
+        'bs_pos': np.array([bs_x, bs_y]),
+        'aoa_maps': aoa_maps,
+        'amplitude_maps': amplitude_maps,
+        'los_map': los_map,
+        'buildings': building_configs,
+        'map_size': map_size,
+        'grid_spacing': grid_spacing
+    }
+    
+    return sample
+
+
 def generate_building_training_data(map_size=(100, 100), grid_spacing=1, bs_grid_spacing=1, 
                                   building_configs=None, save_dir='data/building_training'):
     """
@@ -33,6 +67,16 @@ def generate_building_training_data(map_size=(100, 100), grid_spacing=1, bs_grid
         Each dict contains 'bs_pos', 'aoa_maps', 'amplitude_maps', 'los_map'
     """
     
+    # Try to import parallel processing modules
+    try:
+        from concurrent.futures import ProcessPoolExecutor
+        import multiprocessing as mp
+        use_parallel = True
+        num_workers = min(mp.cpu_count() // 2, 4)  # Conservative worker count
+    except ImportError:
+        use_parallel = False
+        num_workers = 1
+    
     # Default building configuration if none provided
     if building_configs is None:
         building_configs = [
@@ -48,20 +92,42 @@ def generate_building_training_data(map_size=(100, 100), grid_spacing=1, bs_grid
     bs_x_positions = np.arange(5, map_size[0]-5, bs_grid_spacing)  # Avoid edges
     bs_y_positions = np.arange(5, map_size[1]-5, bs_grid_spacing)
     
-    dataset = []
-    total_samples = len(bs_x_positions) * len(bs_y_positions)
+    # Create all combinations
+    bs_positions = [(x, y) for x in bs_x_positions for y in bs_y_positions]
+    total_samples = len(bs_positions)
     
     print(f"Generating {total_samples} training samples...")
     print(f"Map size: {map_size}, Grid spacing: {grid_spacing}")
     print(f"BS grid spacing: {bs_grid_spacing}")
     print(f"Buildings: {len(building_configs)} buildings")
+    print(f"Using {'parallel' if use_parallel else 'sequential'} processing with {num_workers} workers")
     
-    for i, bs_x in enumerate(bs_x_positions):
-        for j, bs_y in enumerate(bs_y_positions):
-            sample_idx = i * len(bs_y_positions) + j
+    dataset = []
+    
+    if use_parallel and total_samples > 4:
+        # Parallel processing for larger datasets
+        # Prepare arguments for worker function
+        worker_args = [(pos, map_size, grid_spacing, building_configs) for pos in bs_positions]
+        
+        # Use parallel processing
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            # Process in batches to avoid memory issues
+            batch_size = max(1, total_samples // num_workers)
             
-            if sample_idx % 100 == 0:
-                print(f"Processing sample {sample_idx}/{total_samples}")
+            for i in range(0, len(worker_args), batch_size):
+                batch_end = min(i + batch_size, len(worker_args))
+                batch_args = worker_args[i:batch_end]
+                
+                batch_results = list(executor.map(_generate_single_sample, batch_args))
+                dataset.extend(batch_results)
+                
+                print(f"Completed {batch_end}/{total_samples} samples ({batch_end/total_samples*100:.1f}%)")
+    
+    else:
+        # Sequential processing (original method)
+        for i, (bs_x, bs_y) in enumerate(bs_positions):
+            if i % 50 == 0:
+                print(f"Processing sample {i}/{total_samples}")
             
             # Create ray tracing model
             rt = RayTracingAoAMap(map_size=map_size, grid_spacing=grid_spacing)
@@ -90,6 +156,16 @@ def generate_building_training_data(map_size=(100, 100), grid_spacing=1, bs_grid
             }
             
             dataset.append(sample)
+    
+    # Save dataset only if save_dir is provided
+    if save_dir is not None:
+        dataset_file = os.path.join(save_dir, f'training_data_grid{bs_grid_spacing}.pkl')
+        with open(dataset_file, 'wb') as f:
+            pickle.dump(dataset, f)
+        print(f"Dataset saved to {dataset_file}")
+    
+    print(f"Total samples: {len(dataset)}")
+    return dataset
     
     # Save dataset only if save_dir is provided
     if save_dir is not None:

@@ -13,8 +13,11 @@ import os
 import pickle
 import sys
 import random
+import threading
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import multiprocessing as mp
+from tqdm import tqdm
+import time
 
 from data.dataloader import register_dataset
 
@@ -139,10 +142,9 @@ class AoAAmpBuildingDataset(VisionDataset):
             configurations = list(executor.map(self._generate_single_configuration_worker, tasks))
         
         print(f"Generated {len(configurations)} building configuration sets:")
-        print(f"  - {self.building_distribution[0]} sets with 1 building")
-        print(f"  - {self.building_distribution[1]} sets with 2 buildings") 
-        print(f"  - {self.building_distribution[2]} sets with 3 buildings")
-        
+        for i in range(len(self.building_distribution)):
+            print(f"  - {self.building_distribution[i]} sets with {i + 1} building(s)")
+
         return configurations
     
     def _generate_single_configuration_worker(self, task):
@@ -225,13 +227,14 @@ class AoAAmpBuildingDataset(VisionDataset):
                 with open(cache_file, 'rb') as f:
                     self.data = pickle.load(f)
                 
-                # Try to load pre-converted tensor data
+                # Try to load pre-converted tensor data directly to CUDA
                 if os.path.exists(tensor_cache_file):
                     print(f"Loading pre-converted tensor data from {tensor_cache_file}...")
-                    if self.device.type == 'cuda':
-                        self.tensor_data = torch.load(tensor_cache_file, map_location=self.device)
-                    else:
-                        self.tensor_data = torch.load(tensor_cache_file, map_location='cpu')
+                    # Load directly to the target device
+                    self.tensor_data = torch.load(tensor_cache_file, map_location=self.device)
+                    # Convert to list of tensors on device
+                    if isinstance(self.tensor_data, torch.Tensor):
+                        self.tensor_data = [self.tensor_data[i] for i in range(self.tensor_data.shape[0])]
                 else:
                     self._convert_to_tensors_gpu()
                     self._save_tensor_cache(tensor_cache_file)
@@ -255,39 +258,147 @@ class AoAAmpBuildingDataset(VisionDataset):
         self._print_dataset_statistics()
     
     def _generate_all_data(self):
-        """Generate data for all building configurations using parallel processing"""
+        """Generate data for all building configurations using parallel processing with progress bar"""
         self.data = []
         
         # Create tasks for parallel data generation
         tasks = [(i, config) for i, config in enumerate(self.building_config_sets)]
         
-        print(f"Generating training data for {len(tasks)} configurations using {self.num_workers} workers...")
+        print(f"\n🏗️  Generating training data for {len(tasks)} building configurations...")
+        print(f"⚙️  Using {self.num_workers} workers on {self.device}")
+        
+        # Create a progress bar for configurations
+        config_progress = tqdm(
+            desc="Building configs", 
+            total=len(tasks), 
+            unit="config",
+            ncols=100,
+            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]'
+        )
+        
+        # Track progress with a callback function
+        completed_configs = 0
+        config_lock = threading.Lock()
+        
+        def update_progress(future):
+            nonlocal completed_configs
+            with config_lock:
+                completed_configs += 1
+                config_progress.update(1)
+            config_progress.set_postfix_str(f"Config {completed_configs}/{len(tasks)}")
         
         # Use ThreadPoolExecutor for I/O bound operations
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-            results = list(executor.map(self._generate_config_data_worker, tasks))
+            # Submit all tasks and add progress callback
+            futures = []
+            for task in tasks:
+                future = executor.submit(self._generate_config_data_worker, task)
+                future.add_done_callback(update_progress)
+                futures.append(future)
+            
+            # Collect results as they complete
+            results = []
+            for future in futures:
+                result = future.result()
+                results.append(result)
         
-        # Flatten results
+        config_progress.close()
+        
+        # Flatten results with progress bar
+        print("\n📊 Consolidating dataset...")
+        total_samples = sum(len(config_data) for config_data in results)
+        
+        sample_progress = tqdm(
+            desc="Samples", 
+            total=total_samples, 
+            unit="sample",
+            ncols=100
+        )
+        
         for config_data in results:
             self.data.extend(config_data)
+            sample_progress.update(len(config_data))
+        
+        sample_progress.close()
+        print(f"✅ Generated {len(self.data)} total samples")
     
     def _generate_config_data_worker(self, task):
         """Worker function for parallel data generation"""
         config_idx, building_config = task
         
-        # Import the function here to avoid circular import
-        from aoa_amp_building_data import generate_building_training_data
+        # Reduce verbose output - only show for first few configs or periodically
+        show_progress = (config_idx < 3) or (config_idx % 10 == 0)
         
-        print(f"Generating data for building configuration {config_idx + 1}/{len(self.building_config_sets)} "
-              f"({len(building_config)} buildings)...")
-        
-        config_data = generate_building_training_data(
-            map_size=self.map_size,
-            grid_spacing=self.grid_spacing,
-            bs_grid_spacing=self.bs_grid_spacing,
-            building_configs=building_config,
-            save_dir=None  # Don't save individual configs to disk
-        )
+        # Try to use GPU-accelerated version if available and requested
+        if self.use_gpu_processing and self.device.type == 'cuda':
+            try:
+                from aoa_amp_building_data_gpu import generate_building_training_data_gpu_batch
+                if show_progress:
+                    print(f"🔥 Using GPU acceleration for config {config_idx + 1}")
+                
+                config_data = generate_building_training_data_gpu_batch(
+                    map_size=self.map_size,
+                    grid_spacing=self.grid_spacing,
+                    bs_grid_spacing=self.bs_grid_spacing,
+                    building_configs=building_config,
+                    save_dir=None,  # Don't save individual configs to disk
+                    device=str(self.device),
+                    batch_size=min(8, self.batch_size),  # Smaller batches for GPU
+                    num_workers=1,  # Single worker per config to avoid nested parallelism
+                    progress_callback=None  # Disable inner progress for cleaner output
+                )
+            except ImportError:
+                if show_progress:
+                    print(f"⚠️  GPU acceleration not available, falling back to optimized CPU")
+                # Fallback to optimized CPU version
+                try:
+                    from aoa_amp_building_data_optimized import generate_building_training_data_optimized
+                    config_data = generate_building_training_data_optimized(
+                        map_size=self.map_size,
+                        grid_spacing=self.grid_spacing,
+                        bs_grid_spacing=self.bs_grid_spacing,
+                        building_configs=building_config,
+                        save_dir=None,
+                        num_workers=1,
+                        use_multiprocessing=False
+                    )
+                except ImportError:
+                    # Final fallback to original version
+                    from aoa_amp_building_data import generate_building_training_data
+                    config_data = generate_building_training_data(
+                        map_size=self.map_size,
+                        grid_spacing=self.grid_spacing,
+                        bs_grid_spacing=self.bs_grid_spacing,
+                        building_configs=building_config,
+                        save_dir=None
+                    )
+        else:
+            # Use CPU-optimized version
+            try:
+                from aoa_amp_building_data_optimized import generate_building_training_data_optimized
+                if show_progress:
+                    print(f"💻 Using optimized CPU for config {config_idx + 1}")
+                config_data = generate_building_training_data_optimized(
+                    map_size=self.map_size,
+                    grid_spacing=self.grid_spacing,
+                    bs_grid_spacing=self.bs_grid_spacing,
+                    building_configs=building_config,
+                    save_dir=None,
+                    num_workers=1,
+                    use_multiprocessing=False
+                )
+            except ImportError:
+                # Fallback to original version
+                if show_progress:
+                    print(f" Using original CPU version for config {config_idx + 1}")
+                from aoa_amp_building_data import generate_building_training_data
+                config_data = generate_building_training_data(
+                    map_size=self.map_size,
+                    grid_spacing=self.grid_spacing,
+                    bs_grid_spacing=self.bs_grid_spacing,
+                    building_configs=building_config,
+                    save_dir=None
+                )
         
         # Add configuration index to each sample
         for sample in config_data:
@@ -298,7 +409,7 @@ class AoAAmpBuildingDataset(VisionDataset):
     
     def _convert_to_tensors_gpu(self):
         """Convert data to tensors using GPU acceleration"""
-        print("Converting data to tensor format using GPU...")
+        print("\n🔄 Converting data to tensor format...")
         
         if self.use_gpu_processing and self.device.type == 'cuda':
             self._convert_with_gpu_batching()
@@ -310,54 +421,143 @@ class AoAAmpBuildingDataset(VisionDataset):
         self.tensor_data = []
         num_samples = len(self.data)
         
-        for i in range(0, num_samples, self.batch_size):
-            batch_end = min(i + self.batch_size, num_samples)
-            batch_samples = self.data[i:batch_end]
-            
-            # Process batch on GPU
-            batch_tensors = []
-            for sample in batch_samples:
-                tensor = self._convert_to_tensor_gpu(sample)
-                batch_tensors.append(tensor)
-            
-            # Stack and move to GPU
-            if batch_tensors:
-                batch_tensor = torch.stack(batch_tensors).to(self.device)
+        print(f"🔥 Converting {num_samples} samples using GPU batching...")
+        
+        # Use tqdm for progress tracking
+        with tqdm(total=num_samples, desc="GPU Conversion", unit="sample", ncols=100) as pbar:
+            for i in range(0, num_samples, self.batch_size):
+                batch_end = min(i + self.batch_size, num_samples)
+                batch_samples = self.data[i:batch_end]
                 
-                # Move back to CPU for storage if needed
-                if self.pin_memory:
-                    batch_tensor = batch_tensor.pin_memory()
+                # Process batch on GPU
+                batch_tensors = []
+                for sample in batch_samples:
+                    tensor = self._convert_to_tensor_gpu(sample)
+                    batch_tensors.append(tensor)
                 
-                # Split back to individual tensors
-                for j in range(batch_tensor.shape[0]):
-                    self.tensor_data.append(batch_tensor[j])
-            
-            if (batch_end) % 500 == 0:
-                print(f"Converted {batch_end}/{num_samples} samples")
+                # Stack tensors and keep on GPU
+                if batch_tensors:
+                    batch_tensor = torch.stack(batch_tensors)
+                    
+                    # Split back to individual tensors (still on GPU)
+                    for j in range(batch_tensor.shape[0]):
+                        self.tensor_data.append(batch_tensor[j])
+                
+                pbar.update(batch_end - i)
     
     def _convert_with_cpu_batching(self):
         """Convert data using CPU with parallel processing"""
-        print("Converting data using CPU parallel processing...")
+        print(f"💻 Converting {len(self.data)} samples using CPU parallel processing...")
         
         # Use ThreadPoolExecutor for CPU-bound tensor conversion
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-            self.tensor_data = list(executor.map(self._convert_to_tensor, self.data))
+            # Use tqdm to track progress
+            self.tensor_data = list(tqdm(
+                executor.map(self._convert_to_tensor, self.data),
+                total=len(self.data),
+                desc="CPU Conversion",
+                unit="sample",
+                ncols=100
+            ))
         
         # Pin memory if requested
         if self.pin_memory and self.device.type == 'cuda':
-            print("Pinning memory for faster GPU transfer...")
-            self.tensor_data = [tensor.pin_memory() for tensor in self.tensor_data]
+            print("📌 Pinning memory for faster GPU transfer...")
+            with tqdm(total=len(self.tensor_data), desc="Pinning memory", unit="sample", ncols=100) as pbar:
+                pinned_data = []
+                for tensor in self.tensor_data:
+                    pinned_data.append(tensor.pin_memory())
+                    pbar.update(1)
+                self.tensor_data = pinned_data
     
     def _convert_to_tensor_gpu(self, sample_data):
         """Convert single sample to tensor using GPU operations"""
         aoa_maps = sample_data['aoa_maps']  # List of 3 2D arrays
         amplitude_maps = sample_data['amplitude_maps']  # List of 3 2D arrays
         
-        # Stack all maps: shape = (6, H, W) - 3 AoA + 3 Amplitude
-        all_maps = np.stack(aoa_maps + amplitude_maps, axis=0)
+        # First, normalize all maps to 2D and get expected shape
+        processed_aoa_maps = []
+        for i, aoa_map in enumerate(aoa_maps):
+            if aoa_map.ndim > 2:
+                aoa_map = np.squeeze(aoa_map)
+            processed_aoa_maps.append(aoa_map)
         
-        # Convert to tensor and move to GPU
-        tensor = torch.from_numpy(all_maps).float().to(self.device)
+        processed_amp_maps = []
+        for i, amp_map in enumerate(amplitude_maps):
+            if amp_map.ndim > 2:
+                amp_map = np.squeeze(amp_map)
+            processed_amp_maps.append(amp_map)
+        
+        # Use the first processed map to determine expected shape
+        expected_shape = processed_aoa_maps[0].shape
+        all_maps_list = processed_aoa_maps + processed_amp_maps
+        
+        # Check for shape mismatches and fix them
+        fixed_maps = []
+        for i, map_data in enumerate(all_maps_list):
+            if map_data.shape != expected_shape:
+                try:
+                    from scipy.ndimage import zoom
+                    zoom_factors = [expected_shape[j] / map_data.shape[j] for j in range(len(map_data.shape))]
+                    if len(zoom_factors) != len(expected_shape):
+                        if map_data.ndim > len(expected_shape):
+                            map_data = np.squeeze(map_data)
+                            zoom_factors = [expected_shape[j] / map_data.shape[j] for j in range(len(expected_shape))]
+                    
+                    map_data = zoom(map_data, zoom_factors, order=1)
+                except ImportError:
+                    if len(expected_shape) == 2 and map_data.ndim == 2:
+                        old_h, old_w = map_data.shape
+                        new_h, new_w = expected_shape
+                        y_coords = np.linspace(0, old_h-1, new_h).astype(int)
+                        x_coords = np.linspace(0, old_w-1, new_w).astype(int)
+                        map_data = map_data[np.ix_(y_coords, x_coords)]
+                    else:
+                        map_data = np.squeeze(map_data)
+                        if map_data.ndim == 2 and map_data.shape != expected_shape:
+                            old_h, old_w = map_data.shape
+                            new_h, new_w = expected_shape
+                            y_coords = np.linspace(0, old_h-1, new_h).astype(int)
+                            x_coords = np.linspace(0, old_w-1, new_w).astype(int)
+                            map_data = map_data[np.ix_(y_coords, x_coords)]
+                except Exception as e:
+                    map_data = np.squeeze(map_data)
+                        
+            fixed_maps.append(map_data)
+        
+        # Final verification that all shapes match
+        final_shapes = [map_data.shape for map_data in fixed_maps]
+        if len(set(final_shapes)) > 1:
+            from collections import Counter
+            shape_counts = Counter(final_shapes)
+            most_common_shape = shape_counts.most_common(1)[0][0]
+            
+            final_fixed_maps = []
+            for i, map_data in enumerate(fixed_maps):
+                if map_data.shape != most_common_shape:
+                    try:
+                        from scipy.ndimage import zoom
+                        zoom_factors = [most_common_shape[j] / map_data.shape[j] for j in range(len(most_common_shape))]
+                        map_data = zoom(map_data, zoom_factors, order=1)
+                    except:
+                        if len(most_common_shape) == 2 and map_data.ndim == 2:
+                            old_h, old_w = map_data.shape
+                            new_h, new_w = most_common_shape
+                            y_coords = np.linspace(0, old_h-1, new_h).astype(int)
+                            x_coords = np.linspace(0, old_w-1, new_w).astype(int)
+                            map_data = map_data[np.ix_(y_coords, x_coords)]
+                final_fixed_maps.append(map_data)
+            fixed_maps = final_fixed_maps
+            
+            final_shapes_check = [map_data.shape for map_data in fixed_maps]
+            if len(set(final_shapes_check)) > 1:
+                raise ValueError(f"Could not resolve shape mismatch. Final shapes: {final_shapes_check}")
+        
+        # Stack all maps: shape = (6, H, W) - 3 AoA + 3 Amplitude
+        all_maps = np.stack(fixed_maps, axis=0)
+        
+        # Convert to tensor but keep on CPU for DataLoader compatibility
+        tensor = torch.from_numpy(all_maps).float()
         
         if self.normalize_data:
             # Normalize AoA maps (first 3 channels) from [-180, 180] to [-1, 1]
@@ -369,7 +569,7 @@ class AoAAmpBuildingDataset(VisionDataset):
             tensor[3:] = 2 * (amp_data - (-90)) / ((-40) - (-90)) - 1
             tensor[3:] = torch.clamp(tensor[3:], -1, 1)
         
-        return tensor.cpu()  # Move back to CPU for storage
+        return tensor  # Return on CPU for DataLoader compatibility
     
     def _convert_to_tensor(self, sample_data):
         """Convert AoA/amplitude maps to tensor format (CPU version)"""
@@ -396,13 +596,15 @@ class AoAAmpBuildingDataset(VisionDataset):
         """Save tensor data to cache"""
         print(f"Saving tensor cache to {cache_file}...")
         
-        # Stack all tensors for efficient saving
+        # Move to CPU temporarily for saving, then back to GPU
         if self.tensor_data:
-            stacked_tensors = torch.stack(self.tensor_data)
+            # Move all tensors to CPU for saving
+            cpu_tensors = [tensor.cpu() for tensor in self.tensor_data]
+            stacked_tensors = torch.stack(cpu_tensors)
             torch.save(stacked_tensors, cache_file)
             
-            # Convert back to list
-            self.tensor_data = [stacked_tensors[i] for i in range(stacked_tensors.shape[0])]
+            # Keep tensors on GPU for usage
+            # self.tensor_data is already on GPU, no need to change
     
     def _print_dataset_statistics(self):
         """Print dataset statistics"""
@@ -415,8 +617,9 @@ class AoAAmpBuildingDataset(VisionDataset):
         for num_buildings in sorted(config_counts.keys()):
             print(f"  - {config_counts[num_buildings]} samples with {num_buildings} building(s)")
         
-        if self.tensor_data:
-            print(f"Tensor data device: {self.tensor_data[0].device if hasattr(self.tensor_data[0], 'device') else 'CPU'}")
+        if self.tensor_data is not None and len(self.tensor_data) > 0:
+            sample_device = self.tensor_data[0].device if hasattr(self.tensor_data[0], 'device') else 'CPU'
+            print(f"Tensor data device: {sample_device}")
     
     def __len__(self):
         return len(self.tensor_data)
@@ -425,14 +628,11 @@ class AoAAmpBuildingDataset(VisionDataset):
         """
         Returns:
             torch.Tensor: Shape (6, H, W) where first 3 channels are AoA maps
-                         and last 3 channels are amplitude maps for strongest paths
+                        and last 3 channels are amplitude maps for strongest paths
         """
         sample = self.tensor_data[idx]
         
-        # Move to GPU if needed
-        if self.device.type == 'cuda' and sample.device.type == 'cpu':
-            sample = sample.to(self.device, non_blocking=True)
-        
+        # Tensor is on CPU, DataLoader will handle GPU transfer with pin_memory
         if self.transforms is not None:
             sample = self.transforms(sample)
             
@@ -459,15 +659,42 @@ class AoAAmpBuildingDataset(VisionDataset):
         if batch_size is None:
             batch_size = self.batch_size
         
-        dataloader_kwargs = {
-            'batch_size': batch_size,
-            'shuffle': shuffle,
-            'num_workers': self.num_workers,
-            'pin_memory': self.pin_memory and self.device.type == 'cuda',
-            'prefetch_factor': self.prefetch_factor,
-            'persistent_workers': True if self.num_workers > 0 else False,
-        }
+        # Check if tensors are on GPU
+        tensors_on_gpu = False
+        if self.tensor_data and len(self.tensor_data) > 0:
+            sample_tensor = self.tensor_data[0]
+            if hasattr(sample_tensor, 'device') and sample_tensor.device.type == 'cuda':
+                tensors_on_gpu = True
+        
+        if tensors_on_gpu:
+            # Tensors are on GPU - must use single-threaded DataLoader
+            dataloader_kwargs = {
+                'batch_size': batch_size,
+                'shuffle': shuffle,
+                'num_workers': 0,  # Must be 0 when tensors are on GPU
+                'pin_memory': False,  # Not needed when data is already on GPU
+                'persistent_workers': False,
+                # Don't set prefetch_factor when num_workers=0
+            }
+            print(f"DataLoader config: workers=0 (GPU tensors), pin_memory=False, device={self.device}")
+        else:
+            # Tensors are on CPU - can use multiprocessing
+            dataloader_kwargs = {
+                'batch_size': batch_size,
+                'shuffle': shuffle,
+                'num_workers': min(self.num_workers or 4, 4),
+                'pin_memory': True,  # Pin memory for fast GPU transfer
+                'prefetch_factor': 2,
+                'persistent_workers': True,
+            }
+            print(f"DataLoader config: workers={dataloader_kwargs['num_workers']}, pin_memory=True, device={self.device}")
+        
+        # Allow overrides from kwargs
         dataloader_kwargs.update(kwargs)
+        
+        # Ensure prefetch_factor is not set when num_workers=0
+        if dataloader_kwargs.get('num_workers', 0) == 0:
+            dataloader_kwargs.pop('prefetch_factor', None)
         
         return torch.utils.data.DataLoader(self, **dataloader_kwargs)
 
