@@ -14,6 +14,15 @@ import time
 
 from aoa_amp_building_gpu import RayTracingAoAMapGPU
 
+# Check CUDA availability
+def get_best_device():
+    """Get the best available device (MPS > CUDA > CPU)"""
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    elif torch.cuda.is_available():
+        return torch.device("cuda")
+    else:
+        return torch.device("cpu")
 
 def generate_sample_data_gpu(args):
     """Generate a single training sample using GPU acceleration."""
@@ -89,7 +98,7 @@ def generate_building_training_data_gpu_batch(map_size=(128, 128), grid_spacing=
     
     # Setup device
     if device == 'auto':
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device = get_best_device()
     
     # Default building configuration if none provided
     if building_configs is None:
@@ -272,8 +281,8 @@ if __name__ == "__main__":
     
     # Small test case
     test_dataset = generate_building_training_data_gpu_batch(
-        map_size=(50, 50),
-        grid_spacing=5,
+        map_size=(20, 20),
+        grid_spacing=1,
         bs_grid_spacing=15,
         building_configs=[
             {'x': 10, 'y': 10, 'width': 15, 'height': 10},

@@ -16,12 +16,25 @@ import warnings
 warnings.filterwarnings('ignore', module='numba')
 
 # Check CUDA availability
+def get_best_device():
+    """Get the best available device (MPS > CUDA > CPU)"""
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    elif torch.cuda.is_available():
+        return torch.device("cuda")
+    else:
+        return torch.device("cpu")
+
+# Update the initialization
+MPS_AVAILABLE = torch.backends.mps.is_available()
 CUDA_AVAILABLE = torch.cuda.is_available()
-if CUDA_AVAILABLE:
+
+if MPS_AVAILABLE:
+    print(f"MPS (Apple Silicon GPU) available")
+elif CUDA_AVAILABLE:
     print(f"CUDA available with {torch.cuda.device_count()} GPU(s)")
-    print(f"Current GPU: {torch.cuda.get_device_name()}")
 else:
-    print("CUDA not available, falling back to CPU")
+    print("No GPU acceleration available, using CPU")
 
 
 def calculate_aoa_gpu(ue_positions: torch.Tensor, bs_pos: torch.Tensor) -> torch.Tensor:
@@ -136,7 +149,9 @@ class RayTracingAoAMapGPU:
         """
         # Set device
         if device is None:
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.device = get_best_device()
+        elif device == 'auto':
+            self.device = get_best_device()
         else:
             self.device = torch.device(device)
         
@@ -232,17 +247,17 @@ class RayTracingAoAMapGPU:
     
     def generate_aoa_map_gpu(self, num_paths=3):
         """
-        GPU-accelerated AoA map generation using PyTorch
+        GPU-accelerated AoA map generation using proper path ranking approach
         
         Parameters:
         -----------
         num_paths : int
-            Number of paths to calculate
+            Number of paths to calculate (ranked by amplitude strength)
             
         Returns:
         --------
         aoa_maps : list of 2D arrays
-            AoA values for each path at each grid point
+            AoA values for each path at each grid point (strongest to weakest)
         los_map : 2D array
             Boolean map indicating LoS condition
         """
@@ -257,80 +272,113 @@ class RayTracingAoAMapGPU:
         # Calculate LOS map using GPU
         los_map = check_los_gpu(self.ue_positions, self.bs_pos, self.building_edges, self.device)
         
-        # Calculate direct path AoA and distances (GPU vectorized)
-        aoa_direct = calculate_aoa_gpu(self.ue_positions, self.bs_pos)
-        distances_direct = calculate_distance_gpu(self.ue_positions, self.bs_pos)
-        path_loss_direct = calculate_path_loss_gpu(distances_direct, los_map, self.device)
+        # Initialize result maps
+        aoa_maps = [torch.zeros((n_y, n_x), device=self.device) for _ in range(num_paths)]
         
-        # Store all paths with their amplitudes for sorting
-        all_paths = []
-        
-        # Direct path
-        amplitude_direct = -path_loss_direct  # Negative for sorting (higher amplitude = lower path loss)
-        all_paths.append((aoa_direct, amplitude_direct))
-        
-        # Calculate reflected and diffracted paths (simplified for GPU efficiency)
-        for building in self.buildings:
-            # Simplified reflection calculation (use building center)
-            building_center = torch.tensor([
-                building['x'] + building['width'] / 2,
-                building['y'] + building['height'] / 2
-            ], dtype=torch.float32, device=self.device)
-            
-            # Reflection AoA (approximate)
-            vec_refl = building_center - self.bs_pos
-            aoa_refl = torch.atan2(vec_refl[1], vec_refl[0]) * 180.0 / math.pi
-            aoa_refl_map = torch.full((n_y, n_x), aoa_refl.item(), dtype=torch.float32, device=self.device)
-            
-            # Reflection path loss (approximate)
-            dist_bs_to_building = torch.norm(building_center - self.bs_pos)
-            dist_building_to_ue = calculate_distance_gpu(self.ue_positions, building_center.unsqueeze(0).unsqueeze(0))
-            dist_refl = dist_bs_to_building + dist_building_to_ue
-            
-            path_loss_refl = calculate_path_loss_gpu(dist_refl, torch.ones_like(los_map), self.device)
-            amplitude_refl = -path_loss_refl
-            
-            all_paths.append((aoa_refl_map, amplitude_refl))
-            
-            # Diffraction paths (simplified - use building corners)
-            for corner in building['corners']:
-                corner_tensor = torch.tensor(corner, dtype=torch.float32, device=self.device)
-                vec_diff = corner_tensor - self.bs_pos
-                aoa_diff = torch.atan2(vec_diff[1], vec_diff[0]) * 180.0 / math.pi
-                aoa_diff_map = torch.full((n_y, n_x), aoa_diff.item(), dtype=torch.float32, device=self.device)
+        # Process each grid point individually to properly rank paths
+        for i in range(n_y):
+            for j in range(n_x):
+                ue_pos = self.ue_positions[i, j]  # Current UE position
                 
-                dist_bs_to_corner = torch.norm(corner_tensor - self.bs_pos)
-                dist_corner_to_ue = calculate_distance_gpu(self.ue_positions, corner_tensor.unsqueeze(0).unsqueeze(0))
-                dist_diff = dist_bs_to_corner + dist_corner_to_ue
+                # Collect all possible paths for this UE position
+                paths = []
                 
-                path_loss_diff = calculate_path_loss_gpu(dist_diff, torch.ones_like(los_map), self.device) + 20
-                amplitude_diff = -path_loss_diff
+                # Direct path
+                aoa_direct = calculate_aoa_gpu(ue_pos.unsqueeze(0).unsqueeze(0), self.bs_pos).item()
+                dist_direct = torch.norm(ue_pos - self.bs_pos).item()
+                pl_direct = self.calculate_path_loss_single(dist_direct, los_map[i, j].item())
+                amplitude_direct = -pl_direct
+                paths.append((aoa_direct, amplitude_direct))
                 
-                all_paths.append((aoa_diff_map, amplitude_diff))
+                # Reflected paths
+                for building in self.buildings:
+                    refl_point = self.calculate_reflection_point_gpu(ue_pos, building)
+                    # AoA is from BS to reflection point (as in original code)
+                    vec_refl = refl_point - self.bs_pos
+                    aoa_refl = torch.atan2(vec_refl[1], vec_refl[0]).item() * 180.0 / math.pi
+                    
+                    dist_refl = (torch.norm(refl_point - self.bs_pos) + torch.norm(ue_pos - refl_point)).item()
+                    pl_refl = self.calculate_path_loss_single(dist_refl, True)
+                    amplitude_refl = -pl_refl
+                    paths.append((aoa_refl, amplitude_refl))
+                
+                # Diffracted paths
+                for building in self.buildings:
+                    diff_point = self.calculate_diffraction_point_gpu(ue_pos, building)
+                    # AoA is from BS to diffraction point (as in original code)
+                    vec_diff = diff_point - self.bs_pos
+                    aoa_diff = torch.atan2(vec_diff[1], vec_diff[0]).item() * 180.0 / math.pi
+                    
+                    dist_diff = (torch.norm(diff_point - self.bs_pos) + torch.norm(ue_pos - diff_point)).item()
+                    pl_diff = self.calculate_path_loss_single(dist_diff, True) + 20  # Additional diffraction loss
+                    amplitude_diff = -pl_diff
+                    paths.append((aoa_diff, amplitude_diff))
+                
+                # Sort paths by amplitude (strongest first)
+                paths = sorted(paths, key=lambda x: -x[1])  # Sort by amplitude (descending)
+                
+                # Assign strongest paths to result maps
+                for k in range(min(num_paths, len(paths))):
+                    aoa_maps[k][i, j] = paths[k][0]
         
-        # Sort paths by amplitude and select strongest ones (GPU optimized)
-        aoa_maps = []
-        
-        for path_idx in range(min(num_paths, len(all_paths))):
-            if path_idx == 0:
-                # First path is always the strongest (direct path)
-                aoa_maps.append(all_paths[0][0].cpu().numpy())
-            else:
-                # For subsequent paths, we need to sort at each pixel
-                # This is simplified - in a full implementation, you'd sort all paths per pixel
-                if path_idx < len(all_paths):
-                    aoa_maps.append(all_paths[path_idx][0].cpu().numpy())
-                else:
-                    # Fill with zeros if not enough paths
-                    aoa_maps.append(torch.zeros((n_y, n_x), device=self.device).cpu().numpy())
-        
-        # Ensure we have exactly num_paths maps
-        while len(aoa_maps) < num_paths:
-            aoa_maps.append(torch.zeros((n_y, n_x), device=self.device).cpu().numpy())
+        # Convert to numpy and return
+        aoa_maps_numpy = [aoa_map.cpu().numpy() for aoa_map in aoa_maps]
         
         if self.verbose:
-            print(f"Generated {len(aoa_maps)} AoA maps")
-        return aoa_maps, los_map.cpu().numpy()
+            print(f"Generated {len(aoa_maps_numpy)} AoA maps with proper path ranking")
+        return aoa_maps_numpy, los_map.cpu().numpy()
+    
+    def calculate_reflection_point_gpu(self, ue_pos, building):
+        """Calculate reflection point on building wall (GPU version)"""
+        x_min, y_min = building['x'], building['y']
+        x_max = x_min + building['width']
+        y_max = y_min + building['height']
+        
+        # Find closest point on building perimeter to midpoint of BS-UE line
+        mid_point = (self.bs_pos + ue_pos) / 2
+        
+        # Check distance to each edge and return closest point
+        edges = [
+            torch.tensor([torch.clamp(mid_point[0], x_min, x_max), y_min], device=self.device),  # bottom
+            torch.tensor([x_max, torch.clamp(mid_point[1], y_min, y_max)], device=self.device),  # right
+            torch.tensor([torch.clamp(mid_point[0], x_min, x_max), y_max], device=self.device),  # top
+            torch.tensor([x_min, torch.clamp(mid_point[1], y_min, y_max)], device=self.device),  # left
+        ]
+        
+        distances = [torch.norm(edge - mid_point) for edge in edges]
+        closest_idx = torch.argmin(torch.stack(distances))
+        return edges[closest_idx]
+    
+    def calculate_diffraction_point_gpu(self, ue_pos, building):
+        """Calculate diffraction point (closest corner by total path length)"""
+        corners = [torch.tensor(corner, dtype=torch.float32, device=self.device) for corner in building['corners']]
+        
+        # Calculate total path length for each corner
+        total_distances = []
+        for corner in corners:
+            dist_bs_to_corner = torch.norm(corner - self.bs_pos)
+            dist_corner_to_ue = torch.norm(ue_pos - corner)
+            total_distances.append(dist_bs_to_corner + dist_corner_to_ue)
+        
+        # Return corner with minimum total path length
+        closest_idx = torch.argmin(torch.stack(total_distances))
+        return corners[closest_idx]
+    
+    def calculate_path_loss_single(self, distance, los):
+        """Calculate path loss for a single path (CPU version for individual calculations)"""
+        frequency = 2.4e9  # 2.4 GHz
+        wavelength = 3e8 / frequency
+        
+        # Avoid division by zero
+        distance = max(distance, 1e-6)
+        
+        pl = 20 * np.log10(4 * np.pi * distance / wavelength)
+        
+        # Add penetration loss for NLOS
+        if not los:
+            pl += 15  # dB
+        
+        return pl
     
     def generate_amplitude_map_gpu(self, num_paths=3):
         """
@@ -355,6 +403,8 @@ class RayTracingAoAMapGPU:
         # Calculate distances and path losses
         distances_direct = calculate_distance_gpu(self.ue_positions, self.bs_pos)
         path_loss_direct = calculate_path_loss_gpu(distances_direct, los_map, self.device)
+        path_loss_direct[distances_direct < 1e-6] = 50  # if ue is at bs position
+
         
         # Convert path loss to amplitude (in dB)
         amplitude_direct = -path_loss_direct  # Received power in dB
@@ -371,7 +421,7 @@ class RayTracingAoAMapGPU:
             
             # Reflection amplitude
             dist_bs_to_building = torch.norm(building_center - self.bs_pos)
-            dist_building_to_ue = calculate_distance_gpu(self.ue_positions, building_center.unsqueeze(0).unsqueeze(0))
+            dist_building_to_ue = calculate_distance_gpu(self.ue_positions, building_center)
             dist_refl = dist_bs_to_building + dist_building_to_ue
             
             path_loss_refl = calculate_path_loss_gpu(dist_refl, torch.ones_like(los_map), self.device)
@@ -383,7 +433,7 @@ class RayTracingAoAMapGPU:
             for corner in building['corners']:
                 corner_tensor = torch.tensor(corner, dtype=torch.float32, device=self.device)
                 dist_bs_to_corner = torch.norm(corner_tensor - self.bs_pos)
-                dist_corner_to_ue = calculate_distance_gpu(self.ue_positions, corner_tensor.unsqueeze(0).unsqueeze(0))
+                dist_corner_to_ue = calculate_distance_gpu(self.ue_positions, corner_tensor)
                 dist_diff = dist_bs_to_corner + dist_corner_to_ue
                 
                 path_loss_diff = calculate_path_loss_gpu(dist_diff, torch.ones_like(los_map), self.device) + 20
@@ -412,6 +462,338 @@ class RayTracingAoAMapGPU:
     def generate_amplitude_map(self, num_paths=3):
         """Backward compatibility wrapper"""
         return self.generate_amplitude_map_gpu(num_paths)
+    
+    def plot_aoa_map(self, aoa_maps, los_map, path_names=None):
+        """
+        Plot AoA maps for all paths, reflecting the strongest paths.
+
+        Parameters:
+        -----------
+        aoa_maps : list of 2D arrays or 4D tensor
+            AoA values for each path
+        los_map : 2D array
+            LoS condition map
+        path_names : list of str
+            Names for each path (e.g., ['Strongest Path', 'Second Strongest', 'Third Strongest'])
+        """
+        # Handle both list of arrays and tensor input
+        if isinstance(aoa_maps, torch.Tensor):
+            # Convert tensor to CPU and handle dimensions
+            aoa_tensor = aoa_maps.cpu()
+            if aoa_tensor.dim() == 4:
+                # 4D tensor: (num_paths, channels, height, width)
+                num_paths = aoa_tensor.shape[0]
+                aoa_maps = []
+                for i in range(num_paths):
+                    # Take first channel and squeeze
+                    map_2d = aoa_tensor[i, 0, :, :].squeeze().numpy()
+                    aoa_maps.append(map_2d)
+            elif aoa_tensor.dim() == 3:
+                # 3D tensor: (num_paths, height, width)
+                num_paths = aoa_tensor.shape[0]
+                aoa_maps = [aoa_tensor[i, :, :].squeeze().numpy() for i in range(num_paths)]
+            elif aoa_tensor.dim() == 2:
+                # 2D tensor: single map
+                aoa_maps = [aoa_tensor.squeeze().numpy()]
+            else:
+                # Higher dimensions, try to squeeze to 2D
+                aoa_maps = [aoa_tensor.squeeze().numpy()]
+        elif isinstance(aoa_maps, list) and len(aoa_maps) > 0:
+            # If it's a list of tensors, convert each to numpy
+            processed_maps = []
+            for aoa_map in aoa_maps:
+                if isinstance(aoa_map, torch.Tensor):
+                    # Convert to CPU and squeeze extra dimensions
+                    map_cpu = aoa_map.cpu().squeeze()
+                    if map_cpu.dim() > 2:
+                        # Take last 2 dimensions if still > 2D
+                        map_cpu = map_cpu[-2:] if map_cpu.dim() == 3 else map_cpu
+                    processed_maps.append(map_cpu.numpy())
+                elif isinstance(aoa_map, np.ndarray):
+                    # Already numpy array, squeeze all extra dimensions
+                    squeezed_map = np.squeeze(aoa_map)
+                    # If still more than 2D after squeezing, take the last 2 dimensions
+                    while squeezed_map.ndim > 2:
+                        squeezed_map = squeezed_map[0] if squeezed_map.shape[0] == 1 else squeezed_map[-1]
+                    processed_maps.append(squeezed_map)
+                else:
+                    processed_maps.append(aoa_map)
+            aoa_maps = processed_maps
+        elif isinstance(aoa_maps, np.ndarray):
+            # Single numpy array
+            if aoa_maps.ndim > 2:
+                aoa_maps = [np.squeeze(aoa_maps)]
+            else:
+                aoa_maps = [aoa_maps]
+
+        num_paths = len(aoa_maps)
+
+        if path_names is None:
+            path_names = [f'Path {i+1}' for i in range(num_paths)]
+
+        fig, axes = plt.subplots(1, num_paths + 1, figsize=(5 * (num_paths + 1), 4))
+
+        if num_paths + 1 == 1:
+            axes = [axes]
+        elif not isinstance(axes, (list, np.ndarray)):
+            axes = [axes]
+
+        # Convert tensors to CPU numpy arrays for plotting
+        X_cpu = self.X.cpu().numpy()
+        Y_cpu = self.Y.cpu().numpy()
+        bs_pos_cpu = self.bs_pos.cpu().numpy()
+        
+        # Verify grid and map dimensions match
+        if len(aoa_maps) > 0:
+            map_shape = aoa_maps[0].shape
+            if map_shape != X_cpu.shape:
+                print(f"Warning: Map shape {map_shape} doesn't match grid shape {X_cpu.shape}")
+                # Try to resize if needed
+                if len(map_shape) == 2 and len(X_cpu.shape) == 2:
+                    print("Attempting to interpolate maps to match grid...")
+                    try:
+                        from scipy.ndimage import zoom
+                        zoom_factors = [X_cpu.shape[i] / map_shape[i] for i in range(2)]
+                        aoa_maps = [zoom(aoa_map, zoom_factors, order=1) for aoa_map in aoa_maps]
+                    except ImportError:
+                        print("scipy not available, cannot resize maps")
+
+        # Plot AoA for each path
+        for idx, (aoa_map, name) in enumerate(zip(aoa_maps, path_names)):
+            ax = axes[idx]
+
+            # Ensure aoa_map is 2D
+            if aoa_map.ndim > 2:
+                aoa_map = np.squeeze(aoa_map)
+            elif aoa_map.ndim < 2:
+                print(f"Warning: AoA map {idx} has insufficient dimensions: {aoa_map.shape}")
+                continue
+                
+            # Final check that dimensions are exactly 2
+            if aoa_map.ndim != 2:
+                print(f"Error: Cannot plot AoA map {idx} with shape {aoa_map.shape}")
+                continue
+
+            # Use the CPU numpy arrays here
+            im = ax.contourf(X_cpu, Y_cpu, aoa_map, levels=20, cmap='twilight')
+            im.set_clim(-180, 180)
+            ax.contour(X_cpu, Y_cpu, aoa_map, levels=10, colors='white', 
+                    linewidths=0.5, alpha=0.3)
+
+            # Plot buildings
+            for building in self.buildings:
+                rect = Rectangle((building['x'], building['y']), 
+                            building['width'], building['height'],
+                            linewidth=2, edgecolor='black', facecolor='gray', alpha=0.7)
+                ax.add_patch(rect)
+
+            # Plot BS - use CPU numpy array
+            ax.plot(bs_pos_cpu[0], bs_pos_cpu[1], 'r*', markersize=20, 
+                label='Base Station', markeredgecolor='black', markeredgewidth=1)
+
+            ax.set_xlabel('X (m)')
+            ax.set_ylabel('Y (m)')
+            ax.set_title(f'{name} - AoA Map')
+            ax.set_aspect('equal')
+            ax.legend()
+
+            cbar = plt.colorbar(im, ax=ax)
+            cbar.set_label('AoA (degrees)')
+
+        # Plot LoS map
+        ax = axes[num_paths]
+        
+        # Handle LoS map - ensure it's 2D
+        if isinstance(los_map, torch.Tensor):
+            los_map = los_map.cpu().numpy()
+        if los_map.ndim > 2:
+            los_map = los_map.squeeze()
+        
+        # Use CPU numpy arrays here too
+        im = ax.contourf(X_cpu, Y_cpu, los_map.astype(float), levels=[0, 0.5, 1], 
+                        cmap='hsv', alpha=0.6)
+
+        for building in self.buildings:
+            rect = Rectangle((building['x'], building['y']), 
+                        building['width'], building['height'],
+                        linewidth=2, edgecolor='black', facecolor='gray', alpha=0.7)
+            ax.add_patch(rect)
+
+        ax.plot(bs_pos_cpu[0], bs_pos_cpu[1], 'r*', markersize=20, 
+            label='Base Station', markeredgecolor='white', markeredgewidth=1)
+
+        ax.set_xlabel('X (m)')
+        ax.set_ylabel('Y (m)')
+        ax.set_title('LoS Condition')
+        ax.set_aspect('equal')
+        ax.legend()
+
+        cbar = plt.colorbar(im, ax=ax, ticks=[0, 1])
+        cbar.set_label('LoS')
+        cbar.ax.set_yticklabels(['NLoS', 'LoS'])
+
+        plt.tight_layout()
+        plt.show()
+
+    def plot_amplitude_map(self, amplitude_maps, path_names=None):
+        """
+        Plot amplitude maps for all paths, reflecting the strongest paths.
+
+        Parameters:
+        -----------
+        amplitude_maps : list of 2D arrays or 4D tensor
+            Amplitude values for each path
+        path_names : list of str
+            Names for each path (e.g., ['Strongest Path', 'Second Strongest', 'Third Strongest'])
+        """
+        # Handle both list of arrays and tensor input
+        if isinstance(amplitude_maps, torch.Tensor):
+            # Convert tensor to CPU and handle dimensions
+            amp_tensor = amplitude_maps.cpu()
+            if amp_tensor.dim() == 4:
+                # 4D tensor: (num_paths, channels, height, width)
+                num_paths = amp_tensor.shape[0]
+                amplitude_maps = []
+                for i in range(num_paths):
+                    # Take first channel and squeeze
+                    map_2d = amp_tensor[i, 0, :, :].squeeze().numpy()
+                    amplitude_maps.append(map_2d)
+            elif amp_tensor.dim() == 3:
+                # 3D tensor: (num_paths, height, width)
+                num_paths = amp_tensor.shape[0]
+                amplitude_maps = [amp_tensor[i, :, :].squeeze().numpy() for i in range(num_paths)]
+            elif amp_tensor.dim() == 2:
+                # 2D tensor: single map
+                amplitude_maps = [amp_tensor.squeeze().numpy()]
+            else:
+                # Higher dimensions, try to squeeze to 2D
+                amplitude_maps = [amp_tensor.squeeze().numpy()]
+        elif isinstance(amplitude_maps, list) and len(amplitude_maps) > 0:
+            # If it's a list of tensors, convert each to numpy
+            processed_maps = []
+            for amp_map in amplitude_maps:
+                if isinstance(amp_map, torch.Tensor):
+                    # Convert to CPU and squeeze extra dimensions
+                    map_cpu = amp_map.cpu().squeeze()
+                    if map_cpu.dim() > 2:
+                        # Take last 2 dimensions if still > 2D
+                        map_cpu = map_cpu[-2:] if map_cpu.dim() == 3 else map_cpu
+                    processed_maps.append(map_cpu.numpy())
+                elif isinstance(amp_map, np.ndarray):
+                    # Already numpy array, squeeze all extra dimensions
+                    squeezed_map = np.squeeze(amp_map)
+                    # If still more than 2D after squeezing, take the last 2 dimensions
+                    while squeezed_map.ndim > 2:
+                        squeezed_map = squeezed_map[0] if squeezed_map.shape[0] == 1 else squeezed_map[-1]
+                    processed_maps.append(squeezed_map)
+                else:
+                    processed_maps.append(amp_map)
+            amplitude_maps = processed_maps
+        elif isinstance(amplitude_maps, np.ndarray):
+            # Single numpy array
+            if amplitude_maps.ndim > 2:
+                amplitude_maps = [np.squeeze(amplitude_maps)]
+            else:
+                amplitude_maps = [amplitude_maps]
+
+        num_paths = len(amplitude_maps)
+
+        if path_names is None:
+            path_names = [f'Path {i+1}' for i in range(num_paths)]
+
+        fig, axes = plt.subplots(1, num_paths, figsize=(5 * num_paths, 4))
+
+        if num_paths == 1:
+            axes = [axes]
+        elif not isinstance(axes, (list, np.ndarray)):
+            axes = [axes]
+
+        # Convert tensors to CPU numpy arrays for plotting
+        X_cpu = self.X.cpu().numpy()
+        Y_cpu = self.Y.cpu().numpy()
+        bs_pos_cpu = self.bs_pos.cpu().numpy()
+        
+        # Verify grid and map dimensions match
+        if len(amplitude_maps) > 0:
+            map_shape = amplitude_maps[0].shape
+            if map_shape != X_cpu.shape:
+                print(f"Warning: Map shape {map_shape} doesn't match grid shape {X_cpu.shape}")
+                # Try to resize if needed
+                if len(map_shape) == 2 and len(X_cpu.shape) == 2:
+                    print("Attempting to interpolate maps to match grid...")
+                    try:
+                        from scipy.ndimage import zoom
+                        zoom_factors = [X_cpu.shape[i] / map_shape[i] for i in range(2)]
+                        amplitude_maps = [zoom(amp_map, zoom_factors, order=1) for amp_map in amplitude_maps]
+                    except ImportError:
+                        print("scipy not available, cannot resize maps")
+        
+        # Calculate common colorbar range for all amplitude maps
+        if len(amplitude_maps) > 0:
+            all_valid_maps = [amp_map for amp_map in amplitude_maps if amp_map.ndim == 2]
+            if all_valid_maps:
+                global_min = min(amp_map.min() for amp_map in all_valid_maps)
+                global_max = max(amp_map.max() for amp_map in all_valid_maps)
+                
+                # Ensure reasonable range
+                if global_max - global_min < 1:
+                    # Very narrow range, expand it
+                    global_min, global_max = global_min - 5, global_max + 5
+                elif global_min > -120 and global_max < -30:
+                    # Already reasonable amplitude range, use as is
+                    pass
+                else:
+                    # Extend range to reasonable defaults while encompassing data
+                    global_min = min(-90, global_min)
+                    global_max = max(-40, global_max)
+                
+                print(f"Using common colorbar range: [{global_min:.1f}, {global_max:.1f}] dB")
+            else:
+                global_min, global_max = -90, -40
+
+        for idx, (amp_map, name) in enumerate(zip(amplitude_maps, path_names)):
+            ax = axes[idx]
+
+            # Ensure amp_map is 2D
+            if amp_map.ndim > 2:
+                amp_map = np.squeeze(amp_map)
+            elif amp_map.ndim < 2:
+                print(f"Warning: Amplitude map {idx} has insufficient dimensions: {amp_map.shape}")
+                continue
+                
+            # Final check that dimensions are exactly 2
+            if amp_map.ndim != 2:
+                print(f"Error: Cannot plot amplitude map {idx} with shape {amp_map.shape}")
+                continue
+
+            # Use CPU numpy arrays here
+            im = ax.contourf(X_cpu, Y_cpu, amp_map, levels=20, cmap='hot_r')
+            
+            # Use the common colorbar range for all amplitude maps
+            im.set_clim(global_min, global_max)
+            
+            # Plot buildings
+            for building in self.buildings:
+                rect = Rectangle((building['x'], building['y']), 
+                            building['width'], building['height'],
+                            linewidth=2, edgecolor='black', facecolor='gray', alpha=0.7)
+                ax.add_patch(rect)
+
+            # Plot BS - use CPU numpy array
+            ax.plot(bs_pos_cpu[0], bs_pos_cpu[1], 'r*', markersize=20, 
+                label='Base Station', markeredgecolor='black', markeredgewidth=1)
+
+            ax.set_xlabel('X (m)')
+            ax.set_ylabel('Y (m)')
+            ax.set_title(f'{name} - Amplitude')
+            ax.set_aspect('equal')
+            ax.legend()
+
+            cbar = plt.colorbar(im, ax=ax)
+            cbar.set_label(f'Amplitude (dB)\nRange: [{global_min:.1f}, {global_max:.1f}]')
+
+        plt.tight_layout()
+        plt.show()
 
 
 # For backward compatibility, replace the original class
@@ -426,7 +808,7 @@ if __name__ == "__main__":
     
     # Create test scenario
     rt = RayTracingAoAMapGPU(map_size=(100, 100), grid_spacing=2, device='auto', verbose=True)
-    rt.set_base_station(50, 50)
+    rt.set_base_station(80, 30)
     rt.add_building(20, 20, 30, 15)
     rt.add_building(75, 56, 25, 19)
     
@@ -435,6 +817,10 @@ if __name__ == "__main__":
     
     aoa_maps, los_map = rt.generate_aoa_map_gpu(num_paths=3)
     amplitude_maps = rt.generate_amplitude_map_gpu(num_paths=3)
+
+    path_names = ['Strongest Path', 'Second Strongest', 'Third Strongest']
+    rt.plot_aoa_map(aoa_maps, los_map, path_names)
+    rt.plot_amplitude_map(amplitude_maps, path_names)
     
     end_time = time.time()
     
