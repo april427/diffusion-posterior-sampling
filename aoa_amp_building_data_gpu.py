@@ -192,7 +192,17 @@ def load_dataset_pickle(filepath):
     return dataset
 
 def generate_batch_data_gpu_optimized(bs_positions_batch, map_size, grid_spacing, building_configs, device):
-    """Generate multiple samples efficiently using true batch processing on GPU."""
+    """
+    Generate multiple samples efficiently using true batch processing on GPU.
+    
+    Returns:
+    --------
+    batch_results : list of dict
+        Each dict contains:
+        - 'aoa_maps': list of 3 2D numpy arrays (shape: [num_paths=3, H, W])
+        - 'amplitude_maps': list of 3 2D numpy arrays (shape: [num_paths=3, H, W])
+        - 'los_map': 2D numpy array (shape: [H, W])
+    """
     
     if device != 'cuda' and device != 'mps':
         return [generate_sample_data_cpu((pos, map_size, grid_spacing, building_configs, device)) 
@@ -223,11 +233,16 @@ def generate_batch_data_gpu_optimized(bs_positions_batch, map_size, grid_spacing
         rt.bs_pos = torch.tensor(bs_pos, device=device, dtype=torch.float32)
         amplitude_maps = rt.generate_amplitude_map_gpu(num_paths=3)
         
-        # Get the first path for each position
+        # Extract all paths for this position (convert to list of 2D numpy arrays)
+        # aoa_maps_batch has shape [batch_size, num_paths, H, W]
+        aoa_maps_list = [aoa_maps_batch[i, path_idx].cpu().numpy() for path_idx in range(3)]
+        
+        # amplitude_maps is already a list of 2D numpy arrays from generate_amplitude_map_gpu
+        
         sample = {
             'bs_pos': np.array(bs_pos),
-            'aoa_maps': aoa_maps_batch[i][0].cpu().numpy(),
-            'amplitude_maps': amplitude_maps[0],  # First path
+            'aoa_maps': aoa_maps_list,  # List of 3 2D arrays
+            'amplitude_maps': amplitude_maps,  # List of 3 2D arrays
             'los_map': los_maps_batch[i].cpu().numpy(),
             'buildings': building_configs,
             'map_size': map_size,

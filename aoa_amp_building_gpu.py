@@ -359,11 +359,6 @@ class RayTracingAoAMapGPU:
         if self.verbose:
             print(f"✅ TRUE GPU vectorization completed - processed {total_positions} positions in parallel")
         
-        print(f"🔍 DEBUG GPU: AoA maps count: {len(result_aoa_maps)}")
-        for i, aoa_map in enumerate(result_aoa_maps):
-            print(f"🔍 DEBUG GPU: AoA map {i} shape: {aoa_map.shape}")
-        
-        print(f"🔍 DEBUG GPU: LOS map shape: {los_map.shape}")
         return result_aoa_maps, los_map.cpu().numpy()
     
     def _calculate_reflection_points_vectorized(self, ue_positions_flat, building):
