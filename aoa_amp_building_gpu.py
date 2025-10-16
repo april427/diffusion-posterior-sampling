@@ -179,10 +179,16 @@ class RayTracingAoAMapGPU:
         # Pre-compute UE positions for vectorized operations
         self.ue_positions = torch.stack([self.X, self.Y], dim=-1)  # Shape: (n_y, n_x, 2)
         
+        # Store grid dimensions for batch processing
+        self.num_y, self.num_x = self.X.shape
+        
         # Initialize structures
         self.bs_pos = None
         self.buildings = []
         self.building_edges = None
+        
+        # Flag for batch processing optimization
+        self.building_edges_computed = False
         
         if self.verbose:
             print(f"Grid shape: {self.ue_positions.shape[:-1]}")
@@ -244,6 +250,9 @@ class RayTracingAoAMapGPU:
             self.building_edges = torch.tensor(all_edges, dtype=torch.float32, device=self.device)
         else:
             self.building_edges = torch.empty((0, 2, 2), dtype=torch.float32, device=self.device)
+        
+        # Mark building edges as computed for batch processing optimization
+        self.building_edges_computed = True
     
     def generate_aoa_map_gpu(self, num_paths=3):
         """
@@ -265,68 +274,158 @@ class RayTracingAoAMapGPU:
             raise ValueError("Base station position not set")
         
         n_y, n_x = self.X.shape
+        total_positions = n_y * n_x
         
         if self.verbose:
-            print(f"Generating AoA maps on GPU for {n_y}x{n_x} grid...")
+            print(f"🔥 TRUE GPU vectorization for {n_y}x{n_x} = {total_positions} positions")
         
-        # Calculate LOS map using GPU
+        # Flatten UE positions for vectorized processing
+        ue_flat = self.ue_positions.reshape(-1, 2)  # Shape: (total_positions, 2)
+        
+        # Calculate LOS for ALL positions at once
         los_map = check_los_gpu(self.ue_positions, self.bs_pos, self.building_edges, self.device)
+        los_flat = los_map.reshape(-1)  # Flatten to match ue_flat
         
-        # Initialize result maps
-        aoa_maps = [torch.zeros((n_y, n_x), device=self.device) for _ in range(num_paths)]
+        # Calculate ALL direct paths at once
+        direct_aoa = calculate_aoa_gpu(ue_flat.unsqueeze(0), self.bs_pos).squeeze(0)  # Shape: (total_positions,)
+        direct_dist = calculate_distance_gpu(ue_flat.unsqueeze(0), self.bs_pos).squeeze(0)
+        direct_pl = calculate_path_loss_gpu(direct_dist.unsqueeze(0), los_flat.unsqueeze(0), self.device).squeeze(0)
+        direct_amp = -direct_pl
         
-        # Process each grid point individually to properly rank paths
-        for i in range(n_y):
-            for j in range(n_x):
-                ue_pos = self.ue_positions[i, j]  # Current UE position
-                
-                # Collect all possible paths for this UE position
-                paths = []
-                
-                # Direct path
-                aoa_direct = calculate_aoa_gpu(ue_pos.unsqueeze(0).unsqueeze(0), self.bs_pos).item()
-                dist_direct = torch.norm(ue_pos - self.bs_pos).item()
-                pl_direct = self.calculate_path_loss_single(dist_direct, los_map[i, j].item())
-                amplitude_direct = -pl_direct
-                paths.append((aoa_direct, amplitude_direct))
-                
-                # Reflected paths
-                for building in self.buildings:
-                    refl_point = self.calculate_reflection_point_gpu(ue_pos, building)
-                    # AoA is from BS to reflection point (as in original code)
-                    vec_refl = refl_point - self.bs_pos
-                    aoa_refl = torch.atan2(vec_refl[1], vec_refl[0]).item() * 180.0 / math.pi
-                    
-                    dist_refl = (torch.norm(refl_point - self.bs_pos) + torch.norm(ue_pos - refl_point)).item()
-                    pl_refl = self.calculate_path_loss_single(dist_refl, True)
-                    amplitude_refl = -pl_refl
-                    paths.append((aoa_refl, amplitude_refl))
-                
-                # Diffracted paths
-                for building in self.buildings:
-                    diff_point = self.calculate_diffraction_point_gpu(ue_pos, building)
-                    # AoA is from BS to diffraction point (as in original code)
-                    vec_diff = diff_point - self.bs_pos
-                    aoa_diff = torch.atan2(vec_diff[1], vec_diff[0]).item() * 180.0 / math.pi
-                    
-                    dist_diff = (torch.norm(diff_point - self.bs_pos) + torch.norm(ue_pos - diff_point)).item()
-                    pl_diff = self.calculate_path_loss_single(dist_diff, True) + 20  # Additional diffraction loss
-                    amplitude_diff = -pl_diff
-                    paths.append((aoa_diff, amplitude_diff))
-                
-                # Sort paths by amplitude (strongest first)
-                paths = sorted(paths, key=lambda x: -x[1])  # Sort by amplitude (descending)
-                
-                # Assign strongest paths to result maps
-                for k in range(min(num_paths, len(paths))):
-                    aoa_maps[k][i, j] = paths[k][0]
+        # Initialize path storage - we'll collect ALL paths for ALL positions
+        all_paths_aoa = [direct_aoa.unsqueeze(1)]  # List of tensors, each (total_positions, 1)
+        all_paths_amp = [direct_amp.unsqueeze(1)]
         
-        # Convert to numpy and return
-        aoa_maps_numpy = [aoa_map.cpu().numpy() for aoa_map in aoa_maps]
+        # Process reflected paths for ALL positions simultaneously
+        for building in self.buildings:
+            refl_points = self._calculate_reflection_points_vectorized(ue_flat, building)  # (total_positions, 2)
+            
+            # Calculate AoA from BS to reflection points
+            refl_vec = refl_points - self.bs_pos.unsqueeze(0)  # (total_positions, 2)
+            refl_aoa = torch.atan2(refl_vec[:, 1], refl_vec[:, 0]) * 180.0 / math.pi  # (total_positions,)
+            
+            # Calculate reflection path distances and amplitudes
+            dist_bs_to_refl = torch.norm(refl_points - self.bs_pos.unsqueeze(0), dim=1)  # (total_positions,)
+            dist_refl_to_ue = torch.norm(ue_flat - refl_points, dim=1)  # (total_positions,)
+            refl_dist = dist_bs_to_refl + dist_refl_to_ue
+            
+            refl_pl = calculate_path_loss_gpu(refl_dist.unsqueeze(0), torch.ones_like(los_flat).unsqueeze(0), self.device).squeeze(0)
+            refl_amp = -refl_pl - 6  # Reflection loss
+            
+            all_paths_aoa.append(refl_aoa.unsqueeze(1))
+            all_paths_amp.append(refl_amp.unsqueeze(1))
+        
+        # Process diffracted paths for ALL positions simultaneously
+        for building in self.buildings:
+            for corner in building['corners']:
+                corner_tensor = torch.tensor(corner, dtype=torch.float32, device=self.device)
+                
+                # Calculate AoA from BS to corner for all UE positions
+                diff_vec = corner_tensor - self.bs_pos  # (2,)
+                diff_aoa = torch.atan2(diff_vec[1], diff_vec[0]) * 180.0 / math.pi  # scalar
+                diff_aoa_all = diff_aoa.repeat(total_positions)  # (total_positions,)
+                
+                # Calculate diffraction path distances
+                dist_bs_to_corner = torch.norm(corner_tensor - self.bs_pos)  # scalar
+                dist_corner_to_ue = torch.norm(ue_flat - corner_tensor.unsqueeze(0), dim=1)  # (total_positions,)
+                diff_dist = dist_bs_to_corner + dist_corner_to_ue
+                
+                diff_pl = calculate_path_loss_gpu(diff_dist.unsqueeze(0), torch.ones_like(los_flat).unsqueeze(0), self.device).squeeze(0)
+                diff_amp = -diff_pl - 30  # Diffraction loss
+                
+                all_paths_aoa.append(diff_aoa_all.unsqueeze(1))
+                all_paths_amp.append(diff_amp.unsqueeze(1))
+        
+        # Stack all paths: (total_positions, num_all_paths)
+        paths_aoa_tensor = torch.cat(all_paths_aoa, dim=1)  # (total_positions, num_all_paths)
+        paths_amp_tensor = torch.cat(all_paths_amp, dim=1)  # (total_positions, num_all_paths)
+        
+        # Sort paths by amplitude for each position (GPU vectorized sorting!)
+        sorted_indices = torch.argsort(paths_amp_tensor, dim=1, descending=True)  # (total_positions, num_all_paths)
+        
+        # Select top paths for each position
+        result_aoa_maps = []
+        for path_idx in range(num_paths):
+            # Get indices for this path rank
+            path_indices = sorted_indices[:, path_idx]  # (total_positions,)
+            
+            # Gather AoA values for this path rank across all positions
+            aoa_values = torch.gather(paths_aoa_tensor, 1, path_indices.unsqueeze(1)).squeeze(1)  # (total_positions,)
+            
+            # Reshape back to map
+            aoa_map = aoa_values.reshape(n_y, n_x)
+            result_aoa_maps.append(aoa_map.cpu().numpy())
         
         if self.verbose:
-            print(f"Generated {len(aoa_maps_numpy)} AoA maps with proper path ranking")
-        return aoa_maps_numpy, los_map.cpu().numpy()
+            print(f"✅ TRUE GPU vectorization completed - processed {total_positions} positions in parallel")
+        
+        print(f"🔍 DEBUG GPU: AoA maps count: {len(result_aoa_maps)}")
+        for i, aoa_map in enumerate(result_aoa_maps):
+            print(f"🔍 DEBUG GPU: AoA map {i} shape: {aoa_map.shape}")
+        
+        print(f"🔍 DEBUG GPU: LOS map shape: {los_map.shape}")
+        return result_aoa_maps, los_map.cpu().numpy()
+    
+    def _calculate_reflection_points_vectorized(self, ue_positions_flat, building):
+        """Calculate reflection points for ALL UE positions at once"""
+        total_positions = ue_positions_flat.shape[0]
+        
+        x_min, y_min = building['x'], building['y']
+        x_max = x_min + building['width']
+        y_max = y_min + building['height']
+        
+        # Broadcast BS position for all UE positions
+        bs_pos_broadcast = self.bs_pos.unsqueeze(0).expand(total_positions, -1)  # (total_positions, 2)
+        
+        # Calculate midpoints for all UE positions
+        mid_points = (bs_pos_broadcast + ue_positions_flat) / 2  # (total_positions, 2)
+        
+        # Calculate closest points on each edge for ALL positions simultaneously
+        edge_points = []
+        
+        # Bottom edge
+        bottom_points = torch.stack([
+            torch.clamp(mid_points[:, 0], x_min, x_max),
+            torch.full((total_positions,), y_min, device=self.device)
+        ], dim=1)
+        edge_points.append(bottom_points)
+        
+        # Right edge  
+        right_points = torch.stack([
+            torch.full((total_positions,), x_max, device=self.device),
+            torch.clamp(mid_points[:, 1], y_min, y_max)
+        ], dim=1)
+        edge_points.append(right_points)
+        
+        # Top edge
+        top_points = torch.stack([
+            torch.clamp(mid_points[:, 0], x_min, x_max),
+            torch.full((total_positions,), y_max, device=self.device)
+        ], dim=1)
+        edge_points.append(top_points)
+        
+        # Left edge
+        left_points = torch.stack([
+            torch.full((total_positions,), x_min, device=self.device),
+            torch.clamp(mid_points[:, 1], y_min, y_max)
+        ], dim=1)
+        edge_points.append(left_points)
+        
+        # Calculate distances to each edge for all positions
+        edge_stack = torch.stack(edge_points, dim=1)  # (total_positions, 4, 2)
+        distances = torch.norm(edge_stack - mid_points.unsqueeze(1), dim=2)  # (total_positions, 4)
+        
+        # Find closest edge for each position
+        closest_indices = torch.argmin(distances, dim=1)  # (total_positions,)
+        
+        # Gather closest points
+        closest_points = torch.gather(
+            edge_stack, 
+            1, 
+            closest_indices.unsqueeze(1).unsqueeze(2).expand(-1, 1, 2)
+        ).squeeze(1)  # (total_positions, 2)
+        
+        return closest_points
     
     def calculate_reflection_point_gpu(self, ue_pos, building):
         """Calculate reflection point on building wall (GPU version)"""
@@ -364,6 +463,114 @@ class RayTracingAoAMapGPU:
         closest_idx = torch.argmin(torch.stack(total_distances))
         return corners[closest_idx]
     
+    def generate_aoa_maps_batch_gpu(self, bs_positions_tensor, num_paths=3):
+        """Generate AoA maps for multiple BS positions simultaneously using GPU vectorization."""
+        batch_size = bs_positions_tensor.shape[0]
+        n_y, n_x = self.X.shape
+        
+        if self.verbose:
+            print(f"Generating AoA maps for {batch_size} BS positions in batch mode")
+        
+        # Initialize results for each path
+        all_aoa_maps = []
+        
+        # Process each BS position in the batch
+        for bs_idx, bs_pos in enumerate(bs_positions_tensor):
+            # Set BS position for this iteration
+            self.bs_pos = bs_pos
+            
+            # Generate AoA map for this BS position
+            aoa_maps, _ = self.generate_aoa_map_gpu(num_paths=num_paths)
+            
+            # Convert numpy arrays to tensors
+            aoa_tensors = [torch.from_numpy(aoa_map).to(self.device) for aoa_map in aoa_maps]
+            
+            # Stack tensors for this BS position
+            bs_aoa_stack = torch.stack(aoa_tensors, dim=0)  # [num_paths, n_y, n_x]
+            all_aoa_maps.append(bs_aoa_stack)
+        
+        # Stack results across batch dimension
+        all_aoa_maps = torch.stack(all_aoa_maps, dim=0)  # [batch_size, num_paths, n_y, n_x]
+        
+        # Generate LOS maps for all positions
+        all_los_maps = self._compute_los_batch_vectorized(bs_positions_tensor)
+        
+        return all_aoa_maps, all_los_maps
+        
+    def generate_amplitude_maps_batch_gpu(self, bs_positions_tensor, num_paths=3):
+        """Generate amplitude maps for multiple BS positions simultaneously using GPU vectorization."""
+        batch_size = bs_positions_tensor.shape[0]
+        n_y, n_x = self.X.shape
+        
+        if self.verbose:
+            print(f"Generating amplitude maps for {batch_size} BS positions in batch mode")
+        
+        # Initialize results for each path
+        all_amplitude_maps = []
+        
+        # Process each BS position in the batch
+        for bs_idx, bs_pos in enumerate(bs_positions_tensor):
+            # Set BS position for this iteration
+            self.bs_pos = bs_pos
+            
+            # Generate amplitude map for this BS position
+            amplitude_maps = self.generate_amplitude_map_gpu(num_paths=num_paths)
+            
+            # Convert numpy arrays to tensors
+            amplitude_tensors = [torch.from_numpy(amp_map).to(self.device) for amp_map in amplitude_maps]
+            
+            # Stack tensors for this BS position
+            bs_amplitude_stack = torch.stack(amplitude_tensors, dim=0)  # [num_paths, n_y, n_x]
+            all_amplitude_maps.append(bs_amplitude_stack)
+        
+        # Stack results across batch dimension
+        all_amplitude_maps = torch.stack(all_amplitude_maps, dim=0)  # [batch_size, num_paths, n_y, n_x]
+        
+        return all_amplitude_maps
+        
+        # Initialize results for each path
+        all_amplitude_maps = []
+        
+        # Process each path
+        for path_idx in range(num_paths):
+            # Create batch result tensor
+            amplitude_batch = torch.zeros(batch_size, n_y, n_x, device=self.device)
+            
+            # Process each BS position in the batch
+            for bs_idx, bs_pos in enumerate(bs_positions_tensor):
+                # Set BS position for this iteration
+                self.bs_pos = bs_pos
+                
+                # Generate amplitude map for this BS position
+                amplitude_maps = self.generate_amplitude_map_gpu(num_paths=num_paths)
+                
+                # Store the result for this path
+                if path_idx < len(amplitude_maps):
+                    amplitude_batch[bs_idx] = torch.from_numpy(amplitude_maps[path_idx]).to(self.device)
+            
+            all_amplitude_maps.append(amplitude_batch)
+        
+        return all_amplitude_maps
+    
+    def _compute_los_batch_vectorized(self, bs_positions_tensor):
+        """Compute LOS maps for all BS positions in the batch."""
+        batch_size = bs_positions_tensor.shape[0]
+        n_y, n_x = self.X.shape
+        
+        # Create batch result tensor
+        los_batch = torch.zeros(batch_size, n_y, n_x, device=self.device, dtype=torch.bool)
+        
+        # Process each BS position
+        for bs_idx, bs_pos in enumerate(bs_positions_tensor):
+            # Set BS position
+            self.bs_pos = bs_pos
+            
+            # Compute LOS for this BS position
+            los_map = check_los_gpu(self.ue_positions, self.bs_pos, self.building_edges, self.device)
+            los_batch[bs_idx] = los_map
+        
+        return los_batch
+
     def calculate_path_loss_single(self, distance, los):
         """Calculate path loss for a single path (CPU version for individual calculations)"""
         frequency = 2.4e9  # 2.4 GHz
@@ -408,6 +615,21 @@ class RayTracingAoAMapGPU:
         
         # Convert path loss to amplitude (in dB)
         amplitude_direct = -path_loss_direct  # Received power in dB
+        
+        # Apply 30 dB decrease for UEs inside buildings
+        for building in self.buildings:
+            # Create a mask for UEs inside this building
+            x_min, y_min = building['x'], building['y']
+            x_max = x_min + building['width']
+            y_max = y_min + building['height']
+            
+            # Check if UE positions are inside the building
+            inside_x = (self.X >= x_min) & (self.X <= x_max)
+            inside_y = (self.Y >= y_min) & (self.Y <= y_max)
+            inside_building = inside_x & inside_y
+            
+            # Apply 30 dB decrease to UEs inside the building
+            amplitude_direct[inside_building] -= 30.0  # 30 dB decrease
         
         # Store all path amplitudes
         all_amplitudes = [amplitude_direct]

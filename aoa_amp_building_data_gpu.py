@@ -6,7 +6,14 @@ This module integrates the GPU ray tracing with the dataset generation pipeline.
 import torch
 import numpy as np
 import os
-import pickle
+import json
+try:
+    import h5py
+    HDF5_AVAILABLE = True
+except ImportError:
+    HDF5_AVAILABLE = False
+    print("Warning: h5py not available, falling back to pickle")
+    import pickle
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import multiprocessing as mp
 from typing import List, Dict, Tuple
@@ -58,6 +65,208 @@ def generate_sample_data_gpu(args):
     }
     
     return sample
+
+
+def save_dataset_hdf5(dataset, filepath):
+    """Save dataset in HDF5 format for better performance with large datasets."""
+    if not HDF5_AVAILABLE:
+        raise ImportError("h5py is required for HDF5 storage. Install with: pip install h5py")
+    
+    print(f"💾 Saving {len(dataset)} samples to HDF5 format: {filepath}")
+    
+    with h5py.File(filepath, 'w') as f:
+        # Create groups for organized storage
+        samples_group = f.create_group('samples')
+        metadata_group = f.create_group('metadata')
+        
+        num_samples = len(dataset)
+        
+        # Get dimensions from first sample
+        if num_samples > 0:
+            first_sample = dataset[0]
+            map_shape = first_sample['aoa_maps'].shape
+            
+            # Create datasets for efficient storage
+            # Base station positions
+            bs_positions = f.create_dataset('bs_positions', 
+                                          (num_samples, 2), 
+                                          dtype=np.float32,
+                                          compression='gzip', compression_opts=6)
+            
+            # AoA maps (samples, num_paths, height, width)
+            aoa_maps = f.create_dataset('aoa_maps', 
+                                       (num_samples,) + map_shape,
+                                       dtype=np.float32,
+                                       compression='gzip', compression_opts=6)
+            
+            # Amplitude maps (samples, num_paths, height, width)
+            amplitude_maps = f.create_dataset('amplitude_maps', 
+                                            (num_samples,) + map_shape,
+                                            dtype=np.float32,
+                                            compression='gzip', compression_opts=6)
+            
+            # LOS maps (samples, height, width)
+            los_shape = first_sample['los_map'].shape
+            los_maps = f.create_dataset('los_maps', 
+                                       (num_samples,) + los_shape,
+                                       dtype=np.float32,
+                                       compression='gzip', compression_opts=6)
+            
+            # Store data efficiently
+            for i, sample in enumerate(dataset):
+                bs_positions[i] = sample['bs_pos']
+                aoa_maps[i] = sample['aoa_maps']
+                amplitude_maps[i] = sample['amplitude_maps']
+                los_maps[i] = sample['los_map']
+            
+            # Store metadata
+            metadata_group.attrs['num_samples'] = num_samples
+            metadata_group.attrs['map_size'] = first_sample['map_size']
+            metadata_group.attrs['grid_spacing'] = first_sample['grid_spacing']
+            
+            # Store building configurations as JSON string
+            buildings_json = json.dumps(first_sample['buildings'])
+            metadata_group.attrs['buildings'] = buildings_json
+            
+            # Store format version for future compatibility
+            metadata_group.attrs['format_version'] = '1.0'
+            metadata_group.attrs['created_by'] = 'aoa_amp_building_data_gpu.py'
+            
+    print(f"✅ Dataset saved successfully to {filepath}")
+
+
+def load_dataset_hdf5(filepath):
+    """Load dataset from HDF5 format."""
+    if not HDF5_AVAILABLE:
+        raise ImportError("h5py is required for HDF5 loading. Install with: pip install h5py")
+    
+    print(f"📖 Loading dataset from HDF5: {filepath}")
+    
+    dataset = []
+    
+    with h5py.File(filepath, 'r') as f:
+        # Load metadata
+        metadata = f['metadata']
+        num_samples = metadata.attrs['num_samples']
+        map_size = tuple(metadata.attrs['map_size'])
+        grid_spacing = float(metadata.attrs['grid_spacing'])
+        buildings = json.loads(metadata.attrs['buildings'])
+        
+        # Load data arrays
+        bs_positions = f['bs_positions'][:]
+        aoa_maps = f['aoa_maps'][:]
+        amplitude_maps = f['amplitude_maps'][:]
+        los_maps = f['los_maps'][:]
+        
+        # Reconstruct dataset
+        for i in range(num_samples):
+            sample = {
+                'bs_pos': bs_positions[i],
+                'aoa_maps': aoa_maps[i],
+                'amplitude_maps': amplitude_maps[i],
+                'los_map': los_maps[i],
+                'buildings': buildings,
+                'map_size': map_size,
+                'grid_spacing': grid_spacing
+            }
+            dataset.append(sample)
+    
+    print(f"✅ Loaded {len(dataset)} samples from HDF5")
+    return dataset
+
+
+def save_dataset_pickle(dataset, filepath):
+    """Save dataset in pickle format (fallback)."""
+    print(f"💾 Saving {len(dataset)} samples to pickle format: {filepath}")
+    with open(filepath, 'wb') as f:
+        pickle.dump(dataset, f)
+    print(f"✅ Dataset saved to {filepath}")
+
+
+def load_dataset_pickle(filepath):
+    """Load dataset from pickle format (fallback)."""
+    print(f"📖 Loading dataset from pickle: {filepath}")
+    with open(filepath, 'rb') as f:
+        dataset = pickle.load(f)
+    print(f"✅ Loaded {len(dataset)} samples from pickle")
+    return dataset
+
+def generate_batch_data_gpu_optimized(bs_positions_batch, map_size, grid_spacing, building_configs, device):
+    """Generate multiple samples efficiently using true batch processing on GPU."""
+    
+    if device != 'cuda' and device != 'mps':
+        return [generate_sample_data_cpu((pos, map_size, grid_spacing, building_configs, device)) 
+                for pos in bs_positions_batch]
+    
+    print(f"🚀 Processing batch of {len(bs_positions_batch)} positions on GPU (optimized)")
+    
+    # Create ONE ray tracer instance for the entire batch
+    rt = RayTracingAoAMapGPU(map_size=map_size, grid_spacing=grid_spacing, device=device, verbose=False)
+    
+    # Add buildings once for all positions
+    for building in building_configs:
+        rt.add_building(building['x'], building['y'], 
+                      building['width'], building['height'])
+    
+    # Process all BS positions in a single batch operation
+    # Convert BS positions to tensor for batch processing
+    bs_positions_tensor = torch.tensor(bs_positions_batch, device=device, dtype=torch.float32)
+    
+    # Generate maps for all positions at once
+    aoa_maps_batch, los_maps_batch = rt.generate_aoa_maps_batch_gpu(bs_positions_tensor, num_paths=3)
+    
+    # Create batch results
+    batch_results = []
+    
+    for i, bs_pos in enumerate(bs_positions_batch):
+        # Generate amplitude map for this position (one at a time for now)
+        rt.bs_pos = torch.tensor(bs_pos, device=device, dtype=torch.float32)
+        amplitude_maps = rt.generate_amplitude_map_gpu(num_paths=3)
+        
+        # Get the first path for each position
+        sample = {
+            'bs_pos': np.array(bs_pos),
+            'aoa_maps': aoa_maps_batch[i][0].cpu().numpy(),
+            'amplitude_maps': amplitude_maps[0],  # First path
+            'los_map': los_maps_batch[i].cpu().numpy(),
+            'buildings': building_configs,
+            'map_size': map_size,
+            'grid_spacing': grid_spacing
+        }
+        batch_results.append(sample)
+    
+    # Clear GPU memory
+    torch.cuda.empty_cache() if device == 'cuda' else None
+    
+    return batch_results
+
+def generate_sample_data_cpu(args):
+    """CPU version for fallback - should be separate from GPU version."""
+    bs_pos, map_size, grid_spacing, building_configs, device = args
+    
+    # Use CPU-optimized ray tracer
+    from aoa_amp_building_data import RayTracingAoAMap  # CPU version
+    
+    rt = RayTracingAoAMap(map_size=map_size, grid_spacing=grid_spacing)
+    bs_x, bs_y = bs_pos
+    rt.set_base_station(bs_x, bs_y)
+    
+    for building in building_configs:
+        rt.add_building(building['x'], building['y'], 
+                      building['width'], building['height'])
+    
+    aoa_maps, los_map = rt.generate_aoa_map(num_paths=3)
+    amplitude_maps = rt.generate_amplitude_map(num_paths=3)
+    
+    return {
+        'bs_pos': np.array([bs_x, bs_y]),
+        'aoa_maps': aoa_maps,
+        'amplitude_maps': amplitude_maps,
+        'los_map': los_map,
+        'buildings': building_configs,
+        'map_size': map_size,
+        'grid_spacing': grid_spacing
+    }
 
 
 def generate_building_training_data_gpu_batch(map_size=(128, 128), grid_spacing=1, bs_grid_spacing=5, 
@@ -145,21 +354,21 @@ def generate_building_training_data_gpu_batch(map_size=(128, 128), grid_spacing=
     start_time = time.time()
     
     if device == 'cuda' and torch.cuda.is_available():
-        # GPU processing - use smaller batches and fewer workers
-        if verbose:
-            print("Using GPU acceleration with batch processing...")
         
+        # Use the optimized batch processing
         for i in range(0, total_samples, batch_size):
             batch_end = min(i + batch_size, total_samples)
             batch_positions = bs_positions[i:batch_end]
             
-            # Process batch sequentially on GPU (GPU doesn't benefit much from multiprocessing)
-            for pos in batch_positions:
-                args = (pos, map_size, grid_spacing, building_configs, device)
-                sample = generate_sample_data_gpu(args)
-                dataset.append(sample)
+            # Process batch with single GPU instance
+            batch_samples = generate_batch_data_gpu_optimized(
+                batch_positions, map_size, grid_spacing, building_configs, device
+            )
+            dataset.extend(batch_samples)
             
-            # Only show progress if verbose or if callback is provided
+            if verbose:
+                print(f"✅ GPU batch {i//batch_size + 1}/{(total_samples + batch_size - 1)//batch_size} completed")
+            
             if progress_callback:
                 progress_callback(batch_end, total_samples)
     
@@ -190,11 +399,15 @@ def generate_building_training_data_gpu_batch(map_size=(128, 128), grid_spacing=
     
     # Save dataset only if save_dir is provided
     if save_dir is not None:
-        dataset_file = os.path.join(save_dir, f'training_data_gpu_grid{bs_grid_spacing}.pkl')
-        print(f"Saving dataset to {dataset_file}...")
-        with open(dataset_file, 'wb') as f:
-            pickle.dump(dataset, f)
-        print(f"Dataset saved to {dataset_file}")
+        # Use HDF5 format if available, fallback to pickle
+        if HDF5_AVAILABLE:
+            dataset_file = os.path.join(save_dir, f'training_data_gpu_grid{bs_grid_spacing}.h5')
+            print(f"Saving dataset to HDF5 format: {dataset_file}...")
+            save_dataset_hdf5(dataset, dataset_file)
+        else:
+            dataset_file = os.path.join(save_dir, f'training_data_gpu_grid{bs_grid_spacing}.pkl')
+            print(f"HDF5 not available, using pickle format: {dataset_file}...")
+            save_dataset_pickle(dataset, dataset_file)
     
     print(f"Total samples: {len(dataset)}")
     print(f"Total time: {total_time:.2f}s")
@@ -206,6 +419,39 @@ def generate_building_training_data_gpu_batch(map_size=(128, 128), grid_spacing=
         print(f"GPU memory cleaned up")
     
     return dataset
+
+
+def load_training_data(data_dir, bs_grid_spacing=5):
+    """
+    Load training data from either HDF5 or pickle format.
+    
+    Parameters:
+    -----------
+    data_dir : str
+        Directory containing the training data
+    bs_grid_spacing : float
+        Grid spacing for BS positions (used in filename)
+    
+    Returns:
+    --------
+    dataset : list of dict
+        Loaded dataset, or None if no file found
+    """
+    # Try HDF5 first (preferred format)
+    hdf5_file = os.path.join(data_dir, f'training_data_gpu_grid{bs_grid_spacing}.h5')
+    if os.path.exists(hdf5_file):
+        if HDF5_AVAILABLE:
+            return load_dataset_hdf5(hdf5_file)
+        else:
+            print(f"Found HDF5 file {hdf5_file} but h5py not available")
+    
+    # Fallback to pickle
+    pickle_file = os.path.join(data_dir, f'training_data_gpu_grid{bs_grid_spacing}.pkl')
+    if os.path.exists(pickle_file):
+        return load_dataset_pickle(pickle_file)
+    
+    print(f"No training data found in {data_dir}")
+    return None
 
 
 def benchmark_gpu_vs_cpu(map_size=(50, 50), grid_spacing=5, bs_grid_spacing=15, 
@@ -278,10 +524,10 @@ def benchmark_gpu_vs_cpu(map_size=(50, 50), grid_spacing=5, bs_grid_spacing=15,
 if __name__ == "__main__":
     # Test the GPU-accelerated data generation
     print("Testing GPU-accelerated building training data generation...")
-    
+    st = time.time()
     # Small test case
     test_dataset = generate_building_training_data_gpu_batch(
-        map_size=(20, 20),
+        map_size=(128, 128),
         grid_spacing=1,
         bs_grid_spacing=15,
         building_configs=[
@@ -291,8 +537,10 @@ if __name__ == "__main__":
         save_dir=None,
         device='auto',
         batch_size=4,
-        num_workers=2
+        num_workers=4
     )
+    et = time.time()
+    print(f"Test completed in {et - st:.2f}s")
     
     print(f"\nGenerated {len(test_dataset)} samples")
     if test_dataset:
