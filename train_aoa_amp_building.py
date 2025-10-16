@@ -55,12 +55,8 @@ def load_checkpoint(model, optimizer, checkpoint_path):
 
 def compute_loss(model, diffusion, batch, device):
     """Compute diffusion training loss"""
-    print(f"🔍 DEBUG: Batch shape before .to(device): {batch.shape}")
-    print(f"🔍 DEBUG: Batch dtype: {batch.dtype}")
-    print(f"🔍 DEBUG: Batch device: {batch.device}")
     
     batch = batch.to(device)
-    print(f"🔍 DEBUG: Batch shape after .to(device): {batch.shape}")
     
     # Sample random timesteps
     batch_size = batch.shape[0]
@@ -68,14 +64,11 @@ def compute_loss(model, diffusion, batch, device):
     
     # Generate noise
     noise = torch.randn_like(batch)
-    print(f"🔍 DEBUG: Noise shape: {noise.shape}")
     
     # Add noise to data using the diffusion process coefficients
     coef1 = extract_and_expand(diffusion.sqrt_alphas_cumprod, timesteps, batch)
     coef2 = extract_and_expand(diffusion.sqrt_one_minus_alphas_cumprod, timesteps, batch)
     noisy_batch = coef1 * batch + coef2 * noise
-    
-    print(f"🔍 DEBUG: Noisy batch shape before model: {noisy_batch.shape}")
     
     # Predict noise with the model
     model_output = model(noisy_batch, timesteps)
@@ -191,7 +184,7 @@ def main():
     batch_size = model_config.get('batch_size', 8)
     learning_rate = float(model_config.get('learning_rate', 1e-4))
     num_epochs = model_config.get('num_epochs', 500)
-    save_interval = model_config.get('save_interval', 2000)
+    save_interval = model_config.get('save_interval', 12000)
     log_interval = model_config.get('log_interval', 50)
     epoch_save_interval = model_config.get('epoch_save_interval', 1)
     
@@ -336,21 +329,21 @@ def main():
             # Update progress bar
             progress_bar.set_postfix({'loss': f'{loss:.4f}'})
             
-            # Logging
-            if step % log_interval == 0:
-                writer.add_scalar('Train/Loss', loss, step)
-                logger.info(f"Step {step}, Loss: {loss:.4f}")
+            # # Logging
+            # if step % log_interval == 0:
+            #     writer.add_scalar('Train/Loss', loss, step)
+            #     logger.info(f"Step {step}, Loss: {loss:.4f}")
             
-            # Save checkpoint
-            if step % save_interval == 0:
-                avg_loss = epoch_loss / num_batches
-                save_checkpoint(model, optimizer, step, avg_loss, args.checkpoint_dir, 
-                              f"checkpoint_step_{step}.pt")
+            # # Save checkpoint 
+            # if step % save_interval == 0:
+            #     avg_loss = epoch_loss / num_batches
+            #     save_checkpoint(model, optimizer, step, avg_loss, args.checkpoint_dir, 
+            #                   f"checkpoint_step_{step}.pt")
                 
-                # Generate samples for visualization
-                sample_path = os.path.join(args.checkpoint_dir, f"samples_step_{step}.npy")
-                sample_and_save(model, diffusion, device, sample_path, 
-                              data_channels=data_channels, image_size=image_size)
+            #     # Generate samples for visualization
+            #     sample_path = os.path.join(args.checkpoint_dir, f"samples_step_{step}.npy")
+            #     sample_and_save(model, diffusion, device, sample_path, 
+            #                   data_channels=data_channels, image_size=image_size)
         
         # End of epoch logging
         avg_epoch_loss = epoch_loss / num_batches if num_batches > 0 else 0

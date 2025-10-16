@@ -284,6 +284,10 @@ class AoAAmpBuildingDataset(VisionDataset):
             self._save_tensor_cache(tensor_cache_file)
         
         print(f"Dataset prepared with {len(self.tensor_data)} samples across {len(self.building_config_sets)} building configurations")
+        
+        # Create metadata list for quick access (parallel to tensor_data)
+        self._create_metadata_list()
+        
         self._print_dataset_statistics()
 
     def _save_raw_data_hdf5(self, cache_file):
@@ -486,8 +490,8 @@ class AoAAmpBuildingDataset(VisionDataset):
         if self.use_gpu_processing and self.device.type == 'cuda':
             try:
                 from aoa_amp_building_data_gpu import generate_building_training_data_gpu_batch
-                if show_progress:
-                    print(f"🔥 Using GPU acceleration for config {config_idx + 1}")
+                # if show_progress:
+                #     print(f"🔥 Using GPU acceleration for config {config_idx + 1}")
                 
                 config_data = generate_building_training_data_gpu_batch(
                     map_size=self.map_size,
@@ -949,6 +953,22 @@ class AoAAmpBuildingDataset(VisionDataset):
             print(f"❌ Error loading PyTorch cache: {e}")
             return None
     
+    def _create_metadata_list(self):
+        """Create a parallel metadata list for quick access without loading full tensors"""
+        self.metadata = []
+        for sample in self.data:
+            metadata = {
+                'bs_pos': sample['bs_pos'],  # Base station position (x, y)
+                'buildings': sample['buildings'],  # List of building configurations
+                'map_size': sample['map_size'],  # Map dimensions
+                'grid_spacing': sample['grid_spacing'],  # Grid spacing
+                'config_idx': sample.get('config_idx', 0),  # Building configuration index
+                'num_buildings': sample.get('num_buildings', len(sample['buildings']))  # Number of buildings
+            }
+            self.metadata.append(metadata)
+        
+        print(f"✅ Created metadata list with {len(self.metadata)} entries")
+    
     def _print_dataset_statistics(self):
         """Print dataset statistics"""
         config_counts = {}
@@ -981,17 +1001,37 @@ class AoAAmpBuildingDataset(VisionDataset):
             
         return sample
     
-    def get_sample_info(self, idx):
-        """Get additional information about a sample"""
-        original_sample = self.data[idx]
-        return {
-            'bs_pos': original_sample['bs_pos'],
-            'map_size': original_sample['map_size'],
-            'grid_spacing': original_sample['grid_spacing'],
-            'buildings': original_sample['buildings'],
-            'config_idx': original_sample['config_idx'],
-            'num_buildings': original_sample['num_buildings']
-        }
+    def get_sample_with_metadata(self, idx):
+        """
+        Get sample tensor along with its metadata.
+        Useful for visualization and evaluation.
+        
+        Returns:
+            tuple: (tensor, metadata) where
+                - tensor: Shape (6, H, W) - the data tensor
+                - metadata: dict with keys:
+                    - 'bs_pos': Base station position (x, y)
+                    - 'buildings': List of building configurations
+                    - 'map_size': Map dimensions
+                    - 'grid_spacing': Grid spacing
+                    - 'config_idx': Building configuration index
+                    - 'num_buildings': Number of buildings
+        """
+        tensor = self[idx]
+        metadata = self.metadata[idx].copy()  # Return a copy to avoid modifications
+        return tensor, metadata
+    
+    def get_metadata(self, idx):
+        """
+        Get metadata for a specific sample index.
+        
+        Args:
+            idx: Sample index
+            
+        Returns:
+            dict: Metadata dictionary with BS position, buildings, etc.
+        """
+        return self.metadata[idx].copy()
     
     def get_building_configurations(self):
         """Get all building configurations used in the dataset"""

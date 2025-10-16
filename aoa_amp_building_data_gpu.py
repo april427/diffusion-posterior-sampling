@@ -208,7 +208,7 @@ def generate_batch_data_gpu_optimized(bs_positions_batch, map_size, grid_spacing
         return [generate_sample_data_cpu((pos, map_size, grid_spacing, building_configs, device)) 
                 for pos in bs_positions_batch]
     
-    print(f"🚀 Processing batch of {len(bs_positions_batch)} positions on GPU (optimized)")
+    # print(f"🚀 Processing batch of {len(bs_positions_batch)} positions on GPU (optimized)")
     
     # Create ONE ray tracer instance for the entire batch
     rt = RayTracingAoAMapGPU(map_size=map_size, grid_spacing=grid_spacing, device=device, verbose=False)
