@@ -38,11 +38,11 @@ dataset:
   root: "./data/building_training_randomized"
   map_size: [128, 128]
   grid_spacing: 1.0     # UE grid spacing (creates 100x100 grid)
-  bs_grid_spacing: 4.0  # BS every 5 meters
+  bs_grid_spacing: 64.0  # BS every 5 meters
  
  # Randomized building configurations
-  num_building_sets: 60
-  building_distribution: [20, 20, 20]  # 40 configs each for 1, 2, 3 buildings
+  num_building_sets: 3
+  building_distribution: [1, 1, 1]  # 40 configs each for 1, 2, 3 buildings
   building_size_range: [[15, 35], [10, 25]]  # [[min_width, max_width], [min_height, max_height]]
   min_building_distance: 5.0
   seed: 42

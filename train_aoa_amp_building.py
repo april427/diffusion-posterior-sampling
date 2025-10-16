@@ -19,6 +19,7 @@ from guided_diffusion.unet import create_model
 from data.dataloader import get_dataset, get_dataloader
 from data.aoa_amp_building_dataset import AoAAmpBuildingDataset  # Import to register the dataset
 from util.logger import get_logger
+import torch.multiprocessing as mp
 
 
 def load_yaml(file_path: str) -> dict:
@@ -54,7 +55,12 @@ def load_checkpoint(model, optimizer, checkpoint_path):
 
 def compute_loss(model, diffusion, batch, device):
     """Compute diffusion training loss"""
+    print(f"🔍 DEBUG: Batch shape before .to(device): {batch.shape}")
+    print(f"🔍 DEBUG: Batch dtype: {batch.dtype}")
+    print(f"🔍 DEBUG: Batch device: {batch.device}")
+    
     batch = batch.to(device)
+    print(f"🔍 DEBUG: Batch shape after .to(device): {batch.shape}")
     
     # Sample random timesteps
     batch_size = batch.shape[0]
@@ -62,11 +68,14 @@ def compute_loss(model, diffusion, batch, device):
     
     # Generate noise
     noise = torch.randn_like(batch)
+    print(f"🔍 DEBUG: Noise shape: {noise.shape}")
     
     # Add noise to data using the diffusion process coefficients
     coef1 = extract_and_expand(diffusion.sqrt_alphas_cumprod, timesteps, batch)
     coef2 = extract_and_expand(diffusion.sqrt_one_minus_alphas_cumprod, timesteps, batch)
     noisy_batch = coef1 * batch + coef2 * noise
+    
+    print(f"🔍 DEBUG: Noisy batch shape before model: {noisy_batch.shape}")
     
     # Predict noise with the model
     model_output = model(noisy_batch, timesteps)
@@ -249,30 +258,38 @@ def main():
     optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
     
     # Generate data if requested
-    if args.generate_data:
-        logger.info("Generating new training data...")
-        from aoa_amp_building_data import generate_building_training_data
+    # if args.generate_data:
+    #     logger.info("Generating new training data...")
+    #     from aoa_amp_building_data_gpu import generate_building_training_data_gpu_batch
         
-        dataset_config = model_config['dataset']
-        generate_building_training_data(
-            map_size=tuple(dataset_config['map_size']),
-            grid_spacing=dataset_config['grid_spacing'],
-            bs_grid_spacing=dataset_config['bs_grid_spacing'],
-            building_configs=dataset_config['building_configs'],
-            save_dir=dataset_config['root']
-        )
+    #     dataset_config = model_config['dataset']
+    #     generate_building_training_data_gpu_batch(
+    #         map_size=tuple(dataset_config['map_size']),
+    #         grid_spacing=dataset_config['grid_spacing'],
+    #         bs_grid_spacing=dataset_config['bs_grid_spacing'],
+    #         building_configs=dataset_config['building_configs'],
+    #         save_dir=dataset_config['root']
+    #     )
     
     # Setup dataset and dataloader
     dataset_config = model_config['dataset']
-    dataloader_config = model_config['dataloader']
+    dataloader_config = model_config.get('dataloader', {})
     
     train_dataset = get_dataset(**dataset_config)
     # Use the dataset's custom dataloader method instead of the generic one
     if hasattr(train_dataset, 'get_dataloader'):
-        train_dataloader = train_dataset.get_dataloader(
-            batch_size=batch_size, 
-            shuffle=True
-        )
+        # Create dataloader kwargs with our primary parameters
+        dataloader_kwargs = {
+            'batch_size': batch_size,
+            'shuffle': True
+        }
+        
+        # Add any additional parameters from config, but don't override our primary ones
+        for key, value in dataloader_config.items():
+            if key not in dataloader_kwargs:
+                dataloader_kwargs[key] = value
+            
+        train_dataloader = train_dataset.get_dataloader(**dataloader_kwargs)
     else:
         # Fallback to generic dataloader with CUDA-safe settings
         train_dataloader = get_dataloader(
@@ -369,4 +386,5 @@ def main():
 
 
 if __name__ == "__main__":
+    mp.set_start_method('spawn', force=True)
     main()
