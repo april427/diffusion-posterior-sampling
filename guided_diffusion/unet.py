@@ -40,6 +40,7 @@ def create_model(
     use_fp16=False,
     use_new_attention_order=False,
     model_path='',
+    data_channels=3,
 ):
     if channel_mult == "":
         if image_size == 512:
@@ -66,9 +67,9 @@ def create_model(
 
     model= UNetModel(
         image_size=image_size,
-        in_channels=3,
+        in_channels=data_channels,
         model_channels=num_channels,
-        out_channels=(3 if not learn_sigma else 6),
+        out_channels=(data_channels if not learn_sigma else data_channels * 2),
         num_res_blocks=num_res_blocks,
         attention_resolutions=tuple(attention_ds),
         dropout=dropout,
@@ -85,7 +86,15 @@ def create_model(
     )
 
     try:
-        model.load_state_dict(th.load(model_path, map_location='cpu'))
+        checkpoint = th.load(model_path, map_location='cpu')
+        # Handle different checkpoint formats
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+        elif isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+            state_dict = checkpoint['state_dict']
+        else:
+            state_dict = checkpoint
+        model.load_state_dict(state_dict)
     except Exception as e:
         print(f"Got exception: {e} / Randomly initialize")
     return model

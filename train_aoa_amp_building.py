@@ -16,6 +16,7 @@ import numpy as np
 
 from guided_diffusion.gaussian_diffusion import create_sampler, extract_and_expand
 from guided_diffusion.unet import create_model
+from torch.utils.data import DataLoader, Subset
 from data.dataloader import get_dataset, get_dataloader
 from data.aoa_amp_building_dataset import AoAAmpBuildingDataset  # Import to register the dataset
 from util.logger import get_logger
@@ -45,10 +46,19 @@ def save_checkpoint(model, optimizer, step, loss, checkpoint_dir, filename="chec
 def load_checkpoint(model, optimizer, checkpoint_path):
     """Load model checkpoint"""
     checkpoint = torch.load(checkpoint_path)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    step = checkpoint['step']
-    loss = checkpoint['loss']
+    
+    # Handle different checkpoint formats
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        step = checkpoint['step']
+        loss = checkpoint['loss']
+    else:
+        # Checkpoint is the state_dict directly
+        model.load_state_dict(checkpoint)
+        step = 0
+        loss = 0.0
+    
     print(f"Checkpoint loaded from {checkpoint_path}, step: {step}, loss: {loss:.4f}")
     return step, loss
 
@@ -194,7 +204,7 @@ def main():
     data_channels = model_config.get('data_channels', 6)  # 6 channels for building data
     image_size = model_config.get('image_size', 100)
     
-    # Create model
+    # Create model - pass data_channels so it creates correct architecture
     model_params = {
         k: v
         for k, v in model_config.items()
@@ -208,38 +218,13 @@ def main():
             'log_interval',
             'dataset',
             'dataloader',
-            'data_channels',
         ]
     }
     
-    model = create_model(**model_params)
+    # Ensure data_channels is passed to create_model
+    model_params['data_channels'] = data_channels
     
-    # Replace the input and output layers to match our data channels
-    if data_channels != 3:
-        # Replace input layer
-        old_input_layer = model.input_blocks[0][0]
-        new_input_layer = torch.nn.Conv2d(
-            data_channels, 
-            old_input_layer.out_channels,
-            kernel_size=old_input_layer.kernel_size,
-            stride=old_input_layer.stride,
-            padding=old_input_layer.padding,
-            bias=old_input_layer.bias is not None
-        )
-        model.input_blocks[0][0] = new_input_layer
-        
-        # Replace output layer
-        old_output_layer = model.out[-1]
-        expected_out_channels = data_channels * 2 if model_config.get('learn_sigma', False) else data_channels
-        new_output_layer = torch.nn.Conv2d(
-            old_output_layer.in_channels,
-            expected_out_channels,
-            kernel_size=old_output_layer.kernel_size,
-            stride=old_output_layer.stride,
-            padding=old_output_layer.padding,
-            bias=old_output_layer.bias is not None
-        )
-        model.out[-1] = new_output_layer
+    model = create_model(**model_params)
     
     model = model.to(device)
     logger.info(f"Model created with {sum(p.numel() for p in model.parameters())} parameters")
@@ -268,36 +253,61 @@ def main():
     dataset_config = model_config['dataset']
     dataloader_config = model_config.get('dataloader', {})
     
-    train_dataset = get_dataset(**dataset_config)
-    # Use the dataset's custom dataloader method instead of the generic one
-    if hasattr(train_dataset, 'get_dataloader'):
-        # Create dataloader kwargs with our primary parameters
-        dataloader_kwargs = {
-            'batch_size': batch_size,
-            'shuffle': True
-        }
-        
-        # Add any additional parameters from config, but don't override our primary ones
-        for key, value in dataloader_config.items():
-            if key not in dataloader_kwargs:
-                dataloader_kwargs[key] = value
-            
-        train_dataloader = train_dataset.get_dataloader(**dataloader_kwargs)
-    else:
-        # Fallback to generic dataloader with CUDA-safe settings
-        train_dataloader = get_dataloader(
-            train_dataset, 
-            batch_size, 
-            num_workers=0,  # Force 0 workers for CUDA compatibility
-            train=True
-        )
+    full_dataset = get_dataset(**dataset_config)
+    total_samples = len(full_dataset)
+    logger.info(f"Full dataset size: {total_samples}")
     
-    logger.info(f"Dataset size: {len(train_dataset)}")
+    # ==========================================================================
+    # TRAIN/TEST SPLIT BY BUILDING CONFIGURATION
+    # Dataset structure: 60 building configs, 20 per group (1, 2, 3 buildings)
+    # Each config has (map_size / bs_grid_spacing)^2 BS positions = samples
+    # Training: first 18 configs per group (configs 0-17, 20-37, 40-57)
+    # Testing:  last 2 configs per group  (configs 18-19, 38-39, 58-59)
+    # ==========================================================================
+    
+    num_building_configs = 60  # Total building configurations
+    configs_per_group = 20     # 20 configs each for 1, 2, 3 buildings
+    train_configs_per_group = 18
+    test_configs_per_group = 2
+    
+    # Calculate samples per building configuration
+    samples_per_config = total_samples // num_building_configs
+    logger.info(f"Samples per building config: {samples_per_config}")
+    
+    # Build train indices: configs 0-17, 20-37, 40-57
+    train_indices = []
+    for group in range(3):  # 3 groups: 1-building, 2-building, 3-building
+        group_start_config = group * configs_per_group  # 0, 20, 40
+        for config_offset in range(train_configs_per_group):  # 0-17
+            config_id = group_start_config + config_offset
+            sample_start = config_id * samples_per_config
+            sample_end = sample_start + samples_per_config
+            train_indices.extend(range(sample_start, sample_end))
+    
+    logger.info(f"Training configs: 0-17 (1 bldg), 20-37 (2 bldg), 40-57 (3 bldg)")
+    logger.info(f"Training samples: {len(train_indices)} ({train_configs_per_group * 3} configs × {samples_per_config} samples)")
+    
+    # Create training subset
+    train_dataset = Subset(full_dataset, train_indices)
+    
+    # Create dataloader
+    dl_kwargs = {
+        'batch_size': batch_size,
+        'shuffle': True,
+        'num_workers': dataloader_config.get('num_workers', 0),
+        'pin_memory': dataloader_config.get('pin_memory', False),
+    }
+    train_dataloader = DataLoader(train_dataset, **dl_kwargs)
+    
+    logger.info(f"Training dataset size: {len(train_dataset)}")
     logger.info(f"Number of batches: {len(train_dataloader)}")
     
     if len(train_dataset) > 0:
-        sample_shape = train_dataset[0].shape
-        logger.info(f"Sample shape: {sample_shape}")
+        sample = train_dataset[0]
+        # Handle case where dataset returns (tensor, idx) tuple
+        sample_tensor = sample[0] if isinstance(sample, (tuple, list)) else sample
+        logger.info(f"Sample shape: {sample_tensor.shape}")
+        logger.info(f"Sample range: [{sample_tensor.min():.3f}, {sample_tensor.max():.3f}]")
         logger.info(f"Sample range: [{train_dataset[0].min():.3f}, {train_dataset[0].max():.3f}]")
     
     # Setup tensorboard

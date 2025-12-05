@@ -218,7 +218,8 @@ def main():
     parser.add_argument('--show_metadata', action='store_true', default=True,
                        help='Show BS position and building locations on plots')
     
-    args = parser.parse_args()
+    # args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
     
     # Load configuration
     print(f"Loading configuration from {args.config}...")

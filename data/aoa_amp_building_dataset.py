@@ -54,7 +54,8 @@ class AoAAmpBuildingDataset(VisionDataset):
                  batch_size: int = 32,
                  num_workers: int = None,
                  pin_memory: bool = True,
-                 prefetch_factor: int = 2):
+                 prefetch_factor: int = 2,
+                 return_index: bool = False):
         """
         Args:
             root: Root directory for caching data
@@ -75,6 +76,7 @@ class AoAAmpBuildingDataset(VisionDataset):
             num_workers: Number of worker processes for data loading
             pin_memory: Whether to pin memory for faster GPU transfer
             prefetch_factor: Number of samples loaded in advance by each worker
+            return_index: Whether to return the sample index along with the data
         """
         super().__init__(root, transforms)
         
@@ -92,6 +94,7 @@ class AoAAmpBuildingDataset(VisionDataset):
         self.batch_size = batch_size
         self.pin_memory = pin_memory
         self.prefetch_factor = prefetch_factor
+        self.return_index = return_index
         
         # Setup device
         if device == 'auto':
@@ -990,16 +993,21 @@ class AoAAmpBuildingDataset(VisionDataset):
     def __getitem__(self, idx):
         """
         Returns:
-            torch.Tensor: Shape (6, H, W) where first 3 channels are AoA maps
-                        and last 3 channels are amplitude maps for strongest paths
+            torch.Tensor or tuple: If return_index=False, returns shape (6, H, W) 
+                                  If return_index=True, returns (tensor, idx)
+                                  where first 3 channels are AoA maps and 
+                                  last 3 channels are amplitude maps for strongest paths
         """
         sample = self.tensor_data[idx]
         
         # Tensor is on CPU, DataLoader will handle GPU transfer with pin_memory
         if self.transforms is not None:
             sample = self.transforms(sample)
-            
-        return sample
+        
+        if self.return_index:
+            return sample, idx
+        else:
+            return sample
     
     def get_sample_with_metadata(self, idx):
         """
