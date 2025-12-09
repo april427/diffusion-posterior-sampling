@@ -92,7 +92,7 @@ def plot_6channel_comparison(input_tensor, label_tensor, recon_tensor, save_path
                              metadata=None, denormalize=True):
     """
     Plot input, label, and reconstruction side-by-side with all 6 channels.
-    Shows BS position and buildings if metadata is provided.
+    Layout: 3 rows (Input, Ground Truth, Reconstruction) x 6 columns (AoA1, AoA2, AoA3, Amp1, Amp2, Amp3)
     
     Args:
         input_tensor: Input tensor (6, H, W)
@@ -130,11 +130,10 @@ def plot_6channel_comparison(input_tensor, label_tensor, recon_tensor, save_path
         input_aoa, label_aoa, recon_aoa = input_np[:3], label_np[:3], recon_np[:3]
         input_amp, label_amp, recon_amp = input_np[3:], label_np[3:], recon_np[3:]
     
-    # Create figure: 6 rows (3 AoA + 3 Amp) x 3 columns (Input, Label, Recon)
-    # Compact layout for paper: smaller figure, tighter spacing
-    fig = plt.figure(figsize=(10, 12))
-    gs = fig.add_gridspec(6, 3, hspace=0.08, wspace=0.12,
-                          left=0.06, right=0.92, top=0.94, bottom=0.04)
+    # Create figure: 3 rows (Input, GT, Recon) x 6 columns (AoA1-3, Amp1-3)
+    fig = plt.figure(figsize=(18, 9))
+    gs = fig.add_gridspec(3, 6, hspace=0.15, wspace=0.25,
+                          left=0.04, right=0.96, top=0.92, bottom=0.05)
     
     # Custom colormap for AoA
     aoa_cmap = LinearSegmentedColormap.from_list(
@@ -147,35 +146,38 @@ def plot_6channel_comparison(input_tensor, label_tensor, recon_tensor, save_path
     buildings = metadata.get('buildings', []) if metadata else []
     grid_spacing = metadata.get('grid_spacing', 1.0) if metadata else 1.0
     
-    column_titles = ['Input', 'Ground Truth', 'Reconstruction']
-    row_labels = ['AoA 1', 'AoA 2', 'AoA 3', 'Amp 1', 'Amp 2', 'Amp 3']
+    row_titles = ['Input', 'Ground Truth', 'Reconstruction']
+    col_titles = ['AoA 1', 'AoA 2', 'AoA 3', 'Amp 1', 'Amp 2', 'Amp 3']
     
-    # Plot AoA channels (rows 0-2)
-    for path_idx in range(3):
-        data_list = [input_aoa[path_idx], label_aoa[path_idx], recon_aoa[path_idx]]
-        
-        for col_idx, data in enumerate(data_list):
-            ax = fig.add_subplot(gs[path_idx, col_idx])
+    # Organize data by row: [input, label, recon]
+    aoa_data = [input_aoa, label_aoa, recon_aoa]
+    amp_data = [input_amp, label_amp, recon_amp]
+    
+    for row_idx in range(3):  # Input, GT, Recon
+        # Plot AoA channels (columns 0-2)
+        for path_idx in range(3):
+            col_idx = path_idx
+            ax = fig.add_subplot(gs[row_idx, col_idx])
+            data = aoa_data[row_idx][path_idx]
+            
             im = ax.imshow(data, cmap=aoa_cmap, vmin=-180, vmax=180, origin='lower',
                           extent=[0, data.shape[1], 0, data.shape[0]])
             
-            # Add title only on first row
-            if path_idx == 0:
-                ax.set_title(column_titles[col_idx], fontsize=9, fontweight='bold')
+            # Add column title only on first row
+            if row_idx == 0:
+                ax.set_title(col_titles[col_idx], fontsize=10, fontweight='bold')
             
             # Add row label on first column
             if col_idx == 0:
-                ax.set_ylabel(row_labels[path_idx], fontsize=8, fontweight='bold')
+                ax.set_ylabel(row_titles[row_idx], fontsize=10, fontweight='bold')
             
-            # Remove tick labels for inner plots to save space
-            if path_idx < 2:
-                ax.set_xticklabels([])
-            if col_idx > 0:
-                ax.set_yticklabels([])
-            ax.tick_params(axis='both', labelsize=6)
+            # Remove tick labels for cleaner look
+            ax.set_xticklabels([])
+            ax.set_yticklabels([])
+            ax.tick_params(axis='both', length=0)
             
-            # Overlay buildings and BS
-            if buildings and col_idx == 1:  # Only on ground truth column
+            # Overlay buildings and BS on Ground Truth row
+            if buildings and row_idx == 1:
                 for building in buildings:
                     x, y = building['x'], building['y']
                     w, h = building['width'], building['height']
@@ -184,46 +186,45 @@ def plot_6channel_comparison(input_tensor, label_tensor, recon_tensor, save_path
                     w_grid = w / grid_spacing
                     h_grid = h / grid_spacing
                     rect = Rectangle((x_grid, y_grid), w_grid, h_grid,
-                                    linewidth=2, edgecolor='white', 
+                                    linewidth=1.5, edgecolor='white', 
                                     facecolor='gray', alpha=0.3)
                     ax.add_patch(rect)
                 
                 if bs_pos is not None:
                     bs_x_grid = bs_pos[0] / grid_spacing
                     bs_y_grid = bs_pos[1] / grid_spacing
-                    ax.plot(bs_x_grid, bs_y_grid, 'w*', markersize=15, 
-                           markeredgecolor='black', markeredgewidth=1.5)
+                    ax.plot(bs_x_grid, bs_y_grid, 'w*', markersize=12, 
+                           markeredgecolor='black', markeredgewidth=1)
             
-            cbar = plt.colorbar(im, ax=ax, fraction=0.035, pad=0.02)
-            cbar.ax.tick_params(labelsize=5)
-            if col_idx == 2:  # Only label rightmost colorbar
-                cbar.set_label('Angle (°)', fontsize=6)
+            # Add colorbar only on last row
+            if row_idx == 2:
+                cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+                cbar.ax.tick_params(labelsize=7)
+                if path_idx == 1:  # Middle AoA column
+                    cbar.set_label('Angle (°)', fontsize=8)
             
             ax.grid(False)
-    
-    # Plot Amplitude channels (rows 3-5)
-    for path_idx in range(3):
-        data_list = [input_amp[path_idx], label_amp[path_idx], recon_amp[path_idx]]
-        row_idx = path_idx + 3
         
-        for col_idx, data in enumerate(data_list):
+        # Plot Amplitude channels (columns 3-5)
+        for path_idx in range(3):
+            col_idx = path_idx + 3
             ax = fig.add_subplot(gs[row_idx, col_idx])
+            data = amp_data[row_idx][path_idx]
+            
             im = ax.imshow(data, cmap='hot', vmin=-90, vmax=-40, origin='lower',
                           extent=[0, data.shape[1], 0, data.shape[0]])
             
-            # Add row label on first column
-            if col_idx == 0:
-                ax.set_ylabel(row_labels[row_idx], fontsize=8, fontweight='bold')
+            # Add column title only on first row
+            if row_idx == 0:
+                ax.set_title(col_titles[col_idx], fontsize=10, fontweight='bold')
             
-            # Remove tick labels for inner plots to save space
-            if path_idx < 2:
-                ax.set_xticklabels([])
-            if col_idx > 0:
-                ax.set_yticklabels([])
-            ax.tick_params(axis='both', labelsize=6)
+            # Remove tick labels for cleaner look
+            ax.set_xticklabels([])
+            ax.set_yticklabels([])
+            ax.tick_params(axis='both', length=0)
             
-            # Overlay buildings and BS
-            if buildings and col_idx == 1:  # Only on ground truth column
+            # Overlay buildings and BS on Ground Truth row
+            if buildings and row_idx == 1:
                 for building in buildings:
                     x, y = building['x'], building['y']
                     w, h = building['width'], building['height']
@@ -232,28 +233,30 @@ def plot_6channel_comparison(input_tensor, label_tensor, recon_tensor, save_path
                     w_grid = w / grid_spacing
                     h_grid = h / grid_spacing
                     rect = Rectangle((x_grid, y_grid), w_grid, h_grid,
-                                    linewidth=2, edgecolor='white', 
+                                    linewidth=1.5, edgecolor='white', 
                                     facecolor='gray', alpha=0.3)
                     ax.add_patch(rect)
                 
                 if bs_pos is not None:
                     bs_x_grid = bs_pos[0] / grid_spacing
                     bs_y_grid = bs_pos[1] / grid_spacing
-                    ax.plot(bs_x_grid, bs_y_grid, 'w*', markersize=15, 
-                           markeredgecolor='black', markeredgewidth=1.5)
+                    ax.plot(bs_x_grid, bs_y_grid, 'w*', markersize=12, 
+                           markeredgecolor='black', markeredgewidth=1)
             
-            cbar = plt.colorbar(im, ax=ax, fraction=0.035, pad=0.02)
-            cbar.ax.tick_params(labelsize=5)
-            if col_idx == 2:  # Only label rightmost colorbar
-                cbar.set_label('Power (dB)', fontsize=6)
+            # Add colorbar only on last row
+            if row_idx == 2:
+                cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.02)
+                cbar.ax.tick_params(labelsize=7)
+                if path_idx == 1:  # Middle Amp column
+                    cbar.set_label('Power (dB)', fontsize=8)
             
             ax.grid(False)
     
     # Overall title with metadata (compact)
-    title = 'Input vs Ground Truth vs Reconstruction'
+    title = 'AoA and Amplitude Reconstruction Comparison'
     if metadata and bs_pos is not None:
-        title += f'  |  BS: ({bs_pos[0]:.0f}, {bs_pos[1]:.0f}), {len(buildings)} bldg'
-    fig.suptitle(title, fontsize=10, fontweight='bold')
+        title += f'  |  BS: ({bs_pos[0]:.0f}, {bs_pos[1]:.0f}), {len(buildings)} building(s)'
+    fig.suptitle(title, fontsize=12, fontweight='bold')
     
     # Save figure
     os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)

@@ -1,14 +1,14 @@
 conditioning:
   method: ps
   params:
-    scale: 2
+    scale: 5.0
 
 measurement:
   operator:
     name: inpainting
   mask_opt:
     mask_type: random
-    mask_prob_range: !!python/tuple [0.5]
+    mask_prob_range: !!python/tuple [0.8, 0.8]
     image_size: 128
   noise:
     name: gaussian
