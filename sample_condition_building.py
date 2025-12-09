@@ -425,6 +425,9 @@ def main():
     parser.add_argument('--task_config', required=True)
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--save_dir', type=str, default='./results')
+    parser.add_argument('--split', type=str, default='test', choices=['test', 'train', 'all'])
+    parser.add_argument('--mask_prob', type=float, default=None)
+    parser.add_argument('--num_samples', type=int, default=None)
     args = parser.parse_args()
 
     logger = get_logger()
@@ -462,6 +465,11 @@ def main():
     model.eval()
 
     measure_cfg = task_config['measurement']
+    if args.mask_prob is not None and 'mask_opt' in measure_cfg:
+        mp = float(args.mask_prob)
+        mo = dict(measure_cfg['mask_opt'])
+        mo['mask_prob_range'] = (mp, mp)
+        measure_cfg['mask_opt'] = mo
     operator = get_operator(device=device, **measure_cfg['operator'])
     noiser = get_noise(**measure_cfg['noise'])
     logger.info(f"Operation: {measure_cfg['operator']['name']} / Noise: {measure_cfg['noise']['name']}")
@@ -498,65 +506,54 @@ def main():
     total_samples = len(full_dataset)
     logger.info(f"Full dataset size: {total_samples}")
     
-    # ==========================================================================
-    # USE TEST SPLIT BY BUILDING CONFIGURATION
-    # Dataset structure: 60 building configs, 20 per group (1, 2, 3 buildings)
-    # Each config has (map_size / bs_grid_spacing)^2 BS positions = samples
-    # Training: first 18 configs per group (configs 0-17, 20-37, 40-57)
-    # Testing:  last 2 configs per group  (configs 18-19, 38-39, 58-59)
-    # ==========================================================================
-    
-    num_building_configs = 60  # Total building configurations
-    configs_per_group = 20     # 20 configs each for 1, 2, 3 buildings
+    num_building_configs = 60
+    configs_per_group = 20
     train_configs_per_group = 18
-    test_configs_per_group = 2
-    
-    # Calculate samples per building configuration
     samples_per_config = total_samples // num_building_configs
-    logger.info(f"Samples per building config: {samples_per_config}")
-    
-    # Build test indices: configs 18-19, 38-39, 58-59
-    # Organize by building count for interleaved sampling
-    test_indices_by_group = {1: [], 2: [], 3: []}
-    for group in range(3):  # 3 groups: 1-building, 2-building, 3-building
-        num_buildings = group + 1
-        group_start_config = group * configs_per_group  # 0, 20, 40
-        for config_offset in range(train_configs_per_group, configs_per_group):  # 18-19
-            config_id = group_start_config + config_offset
-            sample_start = config_id * samples_per_config
-            sample_end = sample_start + samples_per_config
-            test_indices_by_group[num_buildings].extend(range(sample_start, sample_end))
-    
-    # Shuffle indices within each group for random BS locations
-    import random
-    random.seed(42)  # For reproducibility
-    for num_buildings in test_indices_by_group:
-        random.shuffle(test_indices_by_group[num_buildings])
-    
-    # Interleave samples: 1 bldg, 2 bldg, 3 bldg, 1 bldg, 2 bldg, 3 bldg, ...
-    test_indices = []
-    max_samples_per_group = max(len(indices) for indices in test_indices_by_group.values())
-    
-    for i in range(max_samples_per_group):
-        for num_buildings in [1, 2, 3]:
-            if i < len(test_indices_by_group[num_buildings]):
-                test_indices.append(test_indices_by_group[num_buildings][i])
-    
-    logger.info(f"Test configs: 18-19 (1 bldg), 38-39 (2 bldg), 58-59 (3 bldg)")
-    logger.info(f"Test samples: {len(test_indices)} (interleaved by building count, random BS locations)")
-    logger.info(f"Sampling order: 1 bldg → 2 bldg → 3 bldg → 1 bldg → ...")
-    
-    # Create test subset - Note: we wrap indices so Subset returns (tensor, original_idx)
-    test_dataset = Subset(full_dataset, test_indices)
-    
-    # Create dataloader (no shuffle for test)
-    loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=0)
+
+    if args.split == 'test':
+        indices_by_group = {1: [], 2: [], 3: []}
+        for group in range(3):
+            group_start_config = group * configs_per_group
+            for config_offset in range(train_configs_per_group, configs_per_group):
+                config_id = group_start_config + config_offset
+                sample_start = config_id * samples_per_config
+                sample_end = sample_start + samples_per_config
+                indices_by_group[group + 1].extend(range(sample_start, sample_end))
+        import random
+        random.seed(42)
+        for nb in indices_by_group:
+            random.shuffle(indices_by_group[nb])
+        interleaved = []
+        max_len = max(len(v) for v in indices_by_group.values())
+        for i in range(max_len):
+            for nb in [1, 2, 3]:
+                if i < len(indices_by_group[nb]):
+                    interleaved.append(indices_by_group[nb][i])
+        loader = DataLoader(Subset(full_dataset, interleaved), batch_size=1, shuffle=False, num_workers=0)
+        logger.info(f"Using test split with {len(interleaved)} samples")
+    elif args.split == 'train':
+        indices = []
+        for group in range(3):
+            group_start_config = group * configs_per_group
+            for config_offset in range(0, train_configs_per_group):
+                config_id = group_start_config + config_offset
+                sample_start = config_id * samples_per_config
+                sample_end = sample_start + samples_per_config
+                indices.extend(range(sample_start, sample_end))
+        loader = DataLoader(Subset(full_dataset, indices), batch_size=1, shuffle=False, num_workers=0)
+        logger.info(f"Using train split with {len(indices)} samples")
+    else:
+        loader = DataLoader(full_dataset, batch_size=1, shuffle=False, num_workers=0)
+        logger.info(f"Using all samples: {total_samples}")
 
     if measure_cfg['operator']['name'] == 'inpainting':
         mask_gen = mask_generator(**measure_cfg['mask_opt'])
 
     nmse_totals = []
     channel_nmse_records = defaultdict(list)
+    nmse_per_sample = []
+    max_samples = args.num_samples if args.num_samples is not None else None
 
     aoa_channels = 3  # first three channels are AoA
     channel_ranges = [(-np.pi, np.pi)] * aoa_channels + [(-1.0, 1.0)] * (data_channels - aoa_channels)
@@ -601,6 +598,7 @@ def main():
         nmse_totals.append(total_nmse)
         for c_idx, value in enumerate(per_channel_nmse):
             channel_nmse_records[c_idx].append(value)
+        nmse_per_sample.append((enum_idx, total_nmse, per_channel_nmse))
 
         nmse_msg = ", ".join(
             f"ch{c_idx + 1}: {value:.4e}" for c_idx, value in enumerate(per_channel_nmse)
@@ -660,12 +658,61 @@ def main():
         save_aoa_radians(ref_img, os.path.join(out_path, 'label'), fname_base, aoa_channels)
         save_aoa_radians(sample, os.path.join(out_path, 'recon'), fname_base, aoa_channels)
 
+        # Limit number of processed samples if requested
+        if max_samples is not None and (enum_idx + 1) >= max_samples:
+            logger.info(f"Reached requested num_samples = {max_samples}, stopping.")
+            break
+
     if nmse_totals:
         avg_total_nmse = sum(nmse_totals) / len(nmse_totals)
         logger.info(f"Average NMSE over {len(nmse_totals)} samples: {avg_total_nmse:.4e}")
+        avg_channels = []
         for c_idx, values in channel_nmse_records.items():
             avg_channel_nmse = sum(values) / len(values)
+            avg_channels.append(avg_channel_nmse)
             logger.info(f"Average NMSE channel {c_idx + 1}: {avg_channel_nmse:.4e}")
+
+        # Persist NMSE metrics for downstream aggregation
+        try:
+            import csv, json
+            metrics_dir = os.path.join(out_path, 'metrics')
+            os.makedirs(metrics_dir, exist_ok=True)
+
+            # Derive mask_prob for filename
+            mask_prob_val = None
+            mpr = measure_cfg.get('mask_opt', {}).get('mask_prob_range')
+            try:
+                if isinstance(mpr, (int, float)):
+                    mask_prob_val = float(mpr)
+                elif isinstance(mpr, (list, tuple)) and len(mpr) >= 1:
+                    mask_prob_val = float(mpr[0])
+            except Exception:
+                mask_prob_val = None
+
+            suffix = f"_mask_{mask_prob_val:.2f}" if mask_prob_val is not None else ""
+
+            # Per-sample CSV
+            csv_path = os.path.join(metrics_dir, f"nmse_samples{suffix}.csv")
+            with open(csv_path, 'w', newline='') as f:
+                writer = csv.writer(f)
+                header = ['sample_idx', 'total_nmse'] + [f'ch{i+1}_nmse' for i in range(data_channels)]
+                writer.writerow(header)
+                for idx, total, ch_list in nmse_per_sample:
+                    row = [idx, total] + list(ch_list)
+                    writer.writerow(row)
+
+            # Summary JSON
+            summary_path = os.path.join(metrics_dir, f"nmse_summary{suffix}.json")
+            with open(summary_path, 'w') as f:
+                json.dump({
+                    'samples': len(nmse_totals),
+                    'avg_total_nmse': avg_total_nmse,
+                    'avg_channel_nmse': avg_channels,
+                    'mask_prob': mask_prob_val
+                }, f)
+            logger.info(f"Saved NMSE metrics to {csv_path} and {summary_path}")
+        except Exception as e:
+            logger.warning(f"Failed to save NMSE metrics: {e}")
 
 
 if __name__ == '__main__':

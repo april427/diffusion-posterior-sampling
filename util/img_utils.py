@@ -201,7 +201,22 @@ class mask_generator:
         assert mask_type in ['box', 'random', 'both', 'extreme']
         self.mask_type = mask_type
         self.mask_len_range = mask_len_range
-        self.mask_prob_range = mask_prob_range
+        # normalize mask_prob_range to a 2-tuple
+        if mask_prob_range is None:
+            self.mask_prob_range = None
+        else:
+            try:
+                # scalar -> (scalar, scalar); len==1 -> (v, v)
+                if isinstance(mask_prob_range, (int, float)):
+                    v = float(mask_prob_range)
+                    self.mask_prob_range = (v, v)
+                elif hasattr(mask_prob_range, '__len__') and len(mask_prob_range) == 1:
+                    v = float(mask_prob_range[0])
+                    self.mask_prob_range = (v, v)
+                else:
+                    self.mask_prob_range = tuple(mask_prob_range)
+            except Exception:
+                self.mask_prob_range = mask_prob_range
         self.image_size = image_size
         self.margin = margin
 

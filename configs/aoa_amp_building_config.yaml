@@ -15,7 +15,7 @@ resblock_updown: True
 use_checkpoint: False
 use_fp16: False
 use_new_attention_order: False
-model_path: checkpoints/aoa_amp_building/checkpoint_epoch_7.pt  # set to desired checkpoint
+model_path: checkpoints/aoa_amp_building/checkpoint_epoch_10.pt  # set to desired checkpoint
 
 # Data-specific settings
 class_cond: False       # No class conditioning
