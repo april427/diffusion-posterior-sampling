@@ -8,7 +8,7 @@ measurement:
     name: inpainting
   mask_opt:
     mask_type: random
-    mask_prob_range: !!python/tuple [0.8, 0.8]
+    mask_prob_range: !!python/tuple [0.9, 0.9]
     image_size: 128
   noise:
     name: gaussian

@@ -25,6 +25,8 @@ def load_all_results(results_dir):
     patterns = [
         os.path.join(results_dir, 'gpu*_mask*', '*', 'results.json'),
         os.path.join(results_dir, 'gpu*_mask*', 'results.json'),
+        os.path.join(results_dir, 'gpu*_sigma*', '*', 'results.json'),
+        os.path.join(results_dir, 'gpu*_sigma*', 'results.json'),
         os.path.join(results_dir, '*', 'results.json'),
     ]
     
@@ -114,44 +116,74 @@ def plot_combined_results(all_results, save_dir, channel_names=None):
 def _plot_single_sweep_results(all_results, save_dir, mask_probs, noise_sigmas, channel_names):
     """Plot results for single parameter sweep (mask prob or noise sigma)."""
     
-    # Plot 1: Total NMSE vs Mask Probability
-    fig1, ax1 = plt.subplots(figsize=(5,4))
+    # Determine sweep type based on which parameter varies
+    is_noise_sweep = len(noise_sigmas) > 1 and len(mask_probs) == 1
+    is_mask_sweep = len(mask_probs) > 1 and len(noise_sigmas) == 1
     
-    for ns in noise_sigmas:
-        results = [r for r in all_results if r['noise_sigma'] == ns]
-        results = sorted(results, key=lambda x: x['mask_prob'])
+    if is_noise_sweep:
+        # Noise sigma sweep with fixed mask_prob
+        # Convert sigma to dB scale: -10*log10(sigma^2) = -20*log10(sigma)
+        x_values_raw = noise_sigmas
+        x_values = [-20 * np.log10(s) for s in noise_sigmas]  # -10*log10(σ²) = -20*log10(σ)
+        x_label = r'$-10\log_{10}(\sigma^2)$ [dB]'
+        x_tick_labels = [f'{x:.1f}' for x in x_values]
+        file_suffix = 'noise_sigma'
+        sort_key = lambda r: -20 * np.log10(r['noise_sigma'])  # Sort by dB value
+        get_x = lambda r: -20 * np.log10(r['noise_sigma'])
+        groups = mask_probs
+        group_key = lambda r, g: r['mask_prob'] == g
+        group_label = lambda g: f'mask={g*100:.0f}%'
+    else:
+        # Mask probability sweep (default)
+        x_values_raw = mask_probs
+        x_values = mask_probs
+        x_label = 'Mask Probability (% missing)'
+        x_tick_labels = [f'{p*100:.0f}%' for p in mask_probs]
+        file_suffix = 'mask_prob'
+        sort_key = lambda r: r['mask_prob']
+        get_x = lambda r: r['mask_prob']
+        groups = noise_sigmas
+        group_key = lambda r, g: r['noise_sigma'] == g
+        group_label = lambda g: f'σ={g:.3f}'
+    
+    # Plot 1: Total NMSE
+    fig1, ax1 = plt.subplots(figsize=(5, 4))
+    
+    for group in groups:
+        results = [r for r in all_results if group_key(r, group)]
+        results = sorted(results, key=sort_key)
         
-        mps = [r['mask_prob'] for r in results]
+        xs = [get_x(r) for r in results]
         total_means = [r['total_nmse_mean'] for r in results]
         total_stds = [r['total_nmse_std'] for r in results]
         
-        label = f'σ={ns:.3f}' if len(noise_sigmas) > 1 else None
-        ax1.errorbar(mps, total_means, yerr=total_stds, 
+        label = group_label(group) if len(groups) > 1 else None
+        ax1.errorbar(xs, total_means, yerr=total_stds, 
                      marker='o', capsize=5, linewidth=2, markersize=8, label=label)
     
-    ax1.set_xlabel('Mask Probability (% missing)', fontsize=12)
+    ax1.set_xlabel(x_label, fontsize=12)
     ax1.set_ylabel('NMSE', fontsize=12)
-    # ax1.set_title('Total NMSE vs Mask Probability (Combined Results)', fontsize=14)
     ax1.grid(True, alpha=0.3)
-    ax1.set_xticks(mask_probs)
-    ax1.set_xticklabels([f'{p*100:.0f}%' for p in mask_probs])
-    if len(noise_sigmas) > 1:
+    ax1.set_xticks(x_values)
+    ax1.set_xticklabels(x_tick_labels)
+    if len(groups) > 1:
         ax1.legend(loc='best')
     
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'combined_nmse_vs_mask_prob.pdf'), dpi=150)
+    plt.savefig(os.path.join(save_dir, f'combined_nmse_vs_{file_suffix}.pdf'), dpi=150)
+    plt.savefig(os.path.join(save_dir, f'combined_nmse_vs_{file_suffix}.png'), dpi=150)
     plt.close()
-    print(f"Saved: combined_nmse_vs_mask_prob.pdf")
+    print(f"Saved: combined_nmse_vs_{file_suffix}.pdf/png")
     
     # Plot 2: Per-channel NMSE
     fig2, ax2 = plt.subplots(figsize=(5, 4))
     colors = plt.cm.tab10(np.linspace(0, 1, 6))
     
-    # Use results from first noise sigma
-    ns = noise_sigmas[0]
-    results = [r for r in all_results if r['noise_sigma'] == ns]
-    results = sorted(results, key=lambda x: x['mask_prob'])
-    mps = [r['mask_prob'] for r in results]
+    # Use results from first group
+    group = groups[0]
+    results = [r for r in all_results if group_key(r, group)]
+    results = sorted(results, key=sort_key)
+    xs = [get_x(r) for r in results]
     
     for c_idx in range(6):
         c_key = str(c_idx)
@@ -160,22 +192,22 @@ def _plot_single_sweep_results(all_results, save_dir, mask_probs, noise_sigmas, 
             stds = [r['channel_nmse_std'][c_key] for r in results]
             
             label = channel_names[c_idx] if c_idx < len(channel_names) else f'Channel {c_idx+1}'
-            ax2.errorbar(mps, means, yerr=stds, 
+            ax2.errorbar(xs, means, yerr=stds, 
                         marker='o', capsize=3, linewidth=2, markersize=6,
                         label=label, color=colors[c_idx])
     
-    ax2.set_xlabel('Mask Probability (% missing)', fontsize=12)
+    ax2.set_xlabel(x_label, fontsize=12)
     ax2.set_ylabel('NMSE', fontsize=12)
-    # ax2.set_title('Per-Channel NMSE vs Mask Probability', fontsize=14)
-    ax2.legend(loc='best', fontsize=12)
+    ax2.legend(loc='best', fontsize=10)
     ax2.grid(True, alpha=0.3)
-    ax2.set_xticks(mask_probs)
-    ax2.set_xticklabels([f'{p*100:.0f}%' for p in mask_probs])
+    ax2.set_xticks(x_values)
+    ax2.set_xticklabels(x_tick_labels)
     
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'combined_nmse_per_channel.pdf'), dpi=150)
+    plt.savefig(os.path.join(save_dir, f'combined_nmse_per_channel_{file_suffix}.pdf'), dpi=150)
+    plt.savefig(os.path.join(save_dir, f'combined_nmse_per_channel_{file_suffix}.png'), dpi=150)
     plt.close()
-    print(f"Saved: combined_nmse_per_channel.pdf")
+    print(f"Saved: combined_nmse_per_channel_{file_suffix}.pdf/png")
     
     # Plot 3: AoA vs Amplitude
     fig3, ax3 = plt.subplots(figsize=(5, 4))
@@ -194,25 +226,57 @@ def _plot_single_sweep_results(all_results, save_dir, mask_probs, noise_sigmas, 
         aoa_stds.append(np.std(aoa_vals))
         amp_stds.append(np.std(amp_vals))
     
-    ax3.errorbar(mps, aoa_means, yerr=aoa_stds, 
+    ax3.errorbar(xs, aoa_means, yerr=aoa_stds, 
                  marker='s', capsize=5, linewidth=2, markersize=8, 
                  label='AoA (avg)', color='blue')
-    ax3.errorbar(mps, amp_means, yerr=amp_stds, 
+    ax3.errorbar(xs, amp_means, yerr=amp_stds, 
                  marker='^', capsize=5, linewidth=2, markersize=8, 
                  label='Amplitude (avg)', color='red')
     
-    ax3.set_xlabel('Mask Probability (% missing)', fontsize=12)
+    ax3.set_xlabel(x_label, fontsize=12)
     ax3.set_ylabel('NMSE', fontsize=12)
-    # ax3.set_title('AoA vs Amplitude NMSE Comparison', fontsize=14)
     ax3.legend(loc='best', fontsize=12)
     ax3.grid(True, alpha=0.3)
-    ax3.set_xticks(mask_probs)
-    ax3.set_xticklabels([f'{p*100:.0f}%' for p in mask_probs])
+    ax3.set_xticks(x_values)
+    ax3.set_xticklabels(x_tick_labels)
     
     plt.tight_layout()
-    plt.savefig(os.path.join(save_dir, 'combined_nmse_aoa_vs_amp.pdf'), dpi=150)
+    plt.savefig(os.path.join(save_dir, f'combined_nmse_aoa_vs_amp_{file_suffix}.pdf'), dpi=150)
+    plt.savefig(os.path.join(save_dir, f'combined_nmse_aoa_vs_amp_{file_suffix}.png'), dpi=150)
     plt.close()
-    print(f"Saved: combined_nmse_aoa_vs_amp")
+    print(f"Saved: combined_nmse_aoa_vs_amp_{file_suffix}.pdf/png")
+    
+    # Plot 4: All channels + averages in one plot
+    fig4, ax4 = plt.subplots(figsize=(5,4))
+    
+    # Individual channels (lighter lines)
+    for c_idx in range(6):
+        c_key = str(c_idx)
+        if c_key in results[0].get('channel_nmse_mean', {}):
+            means = [r['channel_nmse_mean'][c_key] for r in results]
+            
+            label = channel_names[c_idx] if c_idx < len(channel_names) else f'Channel {c_idx+1}'
+            ax4.plot(xs, means, marker='o', linewidth=1.5, markersize=5,
+                    label=label, color=colors[c_idx], alpha=0.7)
+    
+    # Averages (thicker dashed lines)
+    ax4.plot(xs, aoa_means, marker='s', linewidth=3, markersize=8,
+             label='AoA (avg)', color='darkblue', linestyle='--')
+    ax4.plot(xs, amp_means, marker='^', linewidth=3, markersize=8,
+             label='Amp (avg)', color='darkred', linestyle='--')
+    
+    ax4.set_xlabel(x_label, fontsize=12)
+    ax4.set_ylabel('NMSE', fontsize=12)
+    ax4.legend(loc='best', fontsize=9, ncol=2)
+    ax4.grid(True, alpha=0.3)
+    ax4.set_xticks(x_values)
+    ax4.set_xticklabels(x_tick_labels)
+    
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_dir, f'combined_nmse_all_channels_{file_suffix}.pdf'), dpi=150)
+    plt.savefig(os.path.join(save_dir, f'combined_nmse_all_channels_{file_suffix}.png'), dpi=150)
+    plt.close()
+    print(f"Saved: combined_nmse_all_channels_{file_suffix}.pdf/png")
 
 
 def _plot_grid_results(all_results, save_dir, mask_probs, noise_sigmas, channel_names):

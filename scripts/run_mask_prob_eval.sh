@@ -1,5 +1,5 @@
 #!/bin/bash
-# Automated evaluation of NMSE vs mask probability - Multi-GPU version
+# Automated evaluation of NMSE vs noise sigma - Multi-GPU version
 # Results are saved to separate directories per GPU, then aggregated
 
 # Configuration
@@ -8,24 +8,25 @@ DIFFUSION_CONFIG="configs/diffusion_config.yaml"
 TASK_CONFIG="configs/aoa_amp_building_inpainting.yaml"
 NUM_TEST_SAMPLES=2
 SEED=42
-SAVE_DIR="./results/mask_prob_eval"
+SAVE_DIR="./results/noise_sigma_eval"
 
-# Define GPUs and mask probabilities
+# Define GPUs and noise sigmas
 GPUS=(0)  # Adjust to your available GPUs, e.g., GPUS=(0 1 2 3)
-ALL_MASK_PROBS=(0.75 0.8 0.85 0.9 0.95)
+ALL_NOISE_SIGMAS=(0.562 0.316 0.178 0.1 0.05)
 
-# Optional: noise sigmas (comment out to use task_config default)
-# NOISE_SIGMAS="0.01,0.025,0.05"
+# Fixed mask probability
+MASK_PROB=0.8
 
 # Set to true to load full dataset with metadata (uses more memory)
 # By default, tensor-only mode is used (lighter memory, avoids CUDA OOM)
 FULL_DATASET=false
 
 echo "=============================================="
-echo "Multi-GPU Mask Probability Evaluation"
+echo "Multi-GPU Noise Sigma Evaluation"
 echo "=============================================="
 echo "Using GPUs: ${GPUS[*]}"
-echo "Mask probabilities: ${ALL_MASK_PROBS[*]}"
+echo "Noise sigmas: ${ALL_NOISE_SIGMAS[*]}"
+echo "Fixed mask probability: ${MASK_PROB}"
 echo "Full dataset mode: ${FULL_DATASET}"
 echo "Save directory: ${SAVE_DIR}"
 echo ""
@@ -33,12 +34,12 @@ echo ""
 # Function to run evaluation on a specific GPU
 run_on_gpu() {
     local gpu=$1
-    local mask_prob=$2
-    local save_subdir="${SAVE_DIR}/gpu${gpu}_mask${mask_prob}"
+    local noise_sigma=$2
+    local save_subdir="${SAVE_DIR}/gpu${gpu}_sigma${noise_sigma}"
     
     mkdir -p "${save_subdir}"
     
-    echo "[GPU ${gpu}] Starting mask_prob=${mask_prob}"
+    echo "[GPU ${gpu}] Starting noise_sigma=${noise_sigma}"
     
     # Build command
     CMD="python3 evaluate_mask_prob.py \
@@ -47,7 +48,8 @@ run_on_gpu() {
         --task_config ${TASK_CONFIG} \
         --gpu ${gpu} \
         --num_test_samples ${NUM_TEST_SAMPLES} \
-        --mask_probs ${mask_prob} \
+        --mask_probs ${MASK_PROB} \
+        --noise_sigmas ${noise_sigma} \
         --seed ${SEED} \
         --save_dir ${save_subdir}"
     
@@ -56,15 +58,10 @@ run_on_gpu() {
         CMD="${CMD} --full_dataset"
     fi
     
-    # Add noise sigmas if specified
-    if [ -n "$NOISE_SIGMAS" ]; then
-        CMD="${CMD} --noise_sigmas ${NOISE_SIGMAS}"
-    fi
-    
     # Run and log
     eval ${CMD} 2>&1 | tee "${save_subdir}.log"
     
-    echo "[GPU ${gpu}] Finished mask_prob=${mask_prob}"
+    echo "[GPU ${gpu}] Finished noise_sigma=${noise_sigma}"
 }
 
 # Create save directory
@@ -74,11 +71,11 @@ mkdir -p ${SAVE_DIR}
 job_idx=0
 pids=()
 
-for mask_prob in "${ALL_MASK_PROBS[@]}"; do
+for noise_sigma in "${ALL_NOISE_SIGMAS[@]}"; do
     gpu_idx=$((job_idx % ${#GPUS[@]}))
     gpu=${GPUS[$gpu_idx]}
     
-    run_on_gpu $gpu $mask_prob &
+    run_on_gpu $gpu $noise_sigma &
     pids+=($!)
     
     job_idx=$((job_idx + 1))

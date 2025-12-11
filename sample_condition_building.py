@@ -52,7 +52,7 @@ def save_tensor_channels(
         if channel_multipliers is not None and idx < len(channel_multipliers):
             channel = channel * channel_multipliers[idx]
 
-        channel_name = os.path.join(out_dir, f"{base_name}_channel{idx + 1}.png")
+        channel_name = os.path.join(out_dir, f"{base_name}_channel{idx + 1}.pdf")
         current_cmap = cmap
         if channel_cmaps is not None and idx < len(channel_cmaps) and channel_cmaps[idx]:
             current_cmap = channel_cmaps[idx]
@@ -146,7 +146,7 @@ def plot_6channel_comparison(input_tensor, label_tensor, recon_tensor, save_path
     buildings = metadata.get('buildings', []) if metadata else []
     grid_spacing = metadata.get('grid_spacing', 1.0) if metadata else 1.0
     
-    row_titles = ['Input', 'Ground Truth', 'Reconstruction']
+    row_titles = ['Input', 'Ground Truth', 'PathDiff']
     col_titles = ['AoA 1', 'AoA 2', 'AoA 3', 'Amp 1', 'Amp 2', 'Amp 3']
     
     # Organize data by row: [input, label, recon]
@@ -423,9 +423,9 @@ def compute_nmse(reference: torch.Tensor, estimate: torch.Tensor):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model_config', required=True)
-    parser.add_argument('--diffusion_config', required=True)
-    parser.add_argument('--task_config', required=True)
+    parser.add_argument('--model_config', type=str, default='configs/aoa_amp_building_config.yaml')
+    parser.add_argument('--diffusion_config', type=str, default='configs/diffusion_config.yaml')
+    parser.add_argument('--task_config', type=str, default='configs/aoa_amp_building_inpainting.yaml')
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--save_dir', type=str, default='./results')
     parser.add_argument('--split', type=str, default='test', choices=['test', 'train', 'all'])
@@ -524,7 +524,7 @@ def main():
                 sample_end = sample_start + samples_per_config
                 indices_by_group[group + 1].extend(range(sample_start, sample_end))
         import random
-        random.seed(42)
+        random.seed()
         for nb in indices_by_group:
             random.shuffle(indices_by_group[nb])
         interleaved = []
@@ -609,57 +609,57 @@ def main():
         logger.info(f"NMSE (sample {enum_idx}): total {total_nmse:.4e} {nmse_msg}")
 
         # Save comprehensive comparison plot with metadata in comparison folder
-        comparison_path = os.path.join(out_path, 'comparison', f'{fname_base}_comparison.png')
+        comparison_path = os.path.join(out_path, 'comparison', f'{fname_base}_comparison.pdf')
         plot_6channel_comparison(y_n, ref_img, sample, comparison_path, 
                                 metadata=metadata, denormalize=True)
         
         # Save combined 6-channel plots in their respective directories
-        plot_6channel_single(y_n, os.path.join(out_path, 'input', f'{fname_base}_combined.png'),
-                            title_prefix='Input (Degraded)', metadata=metadata, denormalize=True)
-        plot_6channel_single(ref_img, os.path.join(out_path, 'label', f'{fname_base}_combined.png'),
-                            title_prefix='Ground Truth', metadata=metadata, denormalize=True)
-        plot_6channel_single(sample, os.path.join(out_path, 'recon', f'{fname_base}_combined.png'),
-                            title_prefix='Reconstruction', metadata=metadata, denormalize=True)
+        # plot_6channel_single(y_n, os.path.join(out_path, 'input', f'{fname_base}_combined.pdf'),
+        #                     title_prefix='Input (Degraded)', metadata=metadata, denormalize=True)
+        # plot_6channel_single(ref_img, os.path.join(out_path, 'label', f'{fname_base}_combined.pdf'),
+        #                     title_prefix='Ground Truth', metadata=metadata, denormalize=True)
+        # plot_6channel_single(sample, os.path.join(out_path, 'recon', f'{fname_base}_combined.pdf'),
+        #                     title_prefix='Reconstruction', metadata=metadata, denormalize=True)
 
-        # Legacy channel-by-channel saves (kept for compatibility)
-        save_tensor_channels(
-            y_n,
-            os.path.join(out_path, 'input'),
-            fname_base,
-            cmap='viridis',
-            normalize=False,
-            channel_multipliers=channel_scales,
-            channel_value_ranges=channel_ranges,
-            channel_cmaps=channel_cmaps,
-        )
-        save_tensor_channels(
-            ref_img,
-            os.path.join(out_path, 'label'),
-            fname_base,
-            cmap='viridis',
-            normalize=False,
-            channel_multipliers=channel_scales,
-            channel_value_ranges=channel_ranges,
-            channel_cmaps=channel_cmaps,
-        )
-        save_tensor_channels(
-            sample,
-            os.path.join(out_path, 'recon'),
-            fname_base,
-            cmap='viridis',
-            normalize=False,
-            channel_multipliers=channel_scales,
-            channel_value_ranges=channel_ranges,
-            channel_cmaps=channel_cmaps,
-        )
+        # # Legacy channel-by-channel saves (kept for compatibility)
+        # save_tensor_channels(
+        #     y_n,
+        #     os.path.join(out_path, 'input'),
+        #     fname_base,
+        #     cmap='viridis',
+        #     normalize=False,
+        #     channel_multipliers=channel_scales,
+        #     channel_value_ranges=channel_ranges,
+        #     channel_cmaps=channel_cmaps,
+        # )
+        # save_tensor_channels(
+        #     ref_img,
+        #     os.path.join(out_path, 'label'),
+        #     fname_base,
+        #     cmap='viridis',
+        #     normalize=False,
+        #     channel_multipliers=channel_scales,
+        #     channel_value_ranges=channel_ranges,
+        #     channel_cmaps=channel_cmaps,
+        # )
+        # save_tensor_channels(
+        #     sample,
+        #     os.path.join(out_path, 'recon'),
+        #     fname_base,
+        #     cmap='viridis',
+        #     normalize=False,
+        #     channel_multipliers=channel_scales,
+        #     channel_value_ranges=channel_ranges,
+        #     channel_cmaps=channel_cmaps,
+        # )
 
-        save_tensor_npy(y_n, os.path.join(out_path, 'input', f'{fname_base}.npy'))
-        save_tensor_npy(ref_img, os.path.join(out_path, 'label', f'{fname_base}.npy'))
-        save_tensor_npy(sample, os.path.join(out_path, 'recon', f'{fname_base}.npy'))
+        # save_tensor_npy(y_n, os.path.join(out_path, 'input', f'{fname_base}.npy'))
+        # save_tensor_npy(ref_img, os.path.join(out_path, 'label', f'{fname_base}.npy'))
+        # save_tensor_npy(sample, os.path.join(out_path, 'recon', f'{fname_base}.npy'))
 
-        save_aoa_radians(y_n, os.path.join(out_path, 'input'), fname_base, aoa_channels)
-        save_aoa_radians(ref_img, os.path.join(out_path, 'label'), fname_base, aoa_channels)
-        save_aoa_radians(sample, os.path.join(out_path, 'recon'), fname_base, aoa_channels)
+        # save_aoa_radians(y_n, os.path.join(out_path, 'input'), fname_base, aoa_channels)
+        # save_aoa_radians(ref_img, os.path.join(out_path, 'label'), fname_base, aoa_channels)
+        # save_aoa_radians(sample, os.path.join(out_path, 'recon'), fname_base, aoa_channels)
 
         # Limit number of processed samples if requested
         if max_samples is not None and (enum_idx + 1) >= max_samples:
