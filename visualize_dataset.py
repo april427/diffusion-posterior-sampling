@@ -14,6 +14,7 @@ from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.patches import Rectangle
 import numpy as np
 import os
+import random
 
 from data.dataloader import get_dataset
 from data.aoa_amp_building_dataset import AoAAmpBuildingDataset
@@ -51,7 +52,7 @@ def plot_dataset_sample(sample_tensor, sample_idx=0, save_path=None, denormalize
         # Denormalize amplitude maps (last 3 channels) from [-1, 1] to dB
         # Original normalization: 2 * (amp - (-90)) / ((-40) - (-90)) - 1
         # Inverse: amp = (norm + 1) * ((-40) - (-90)) / 2 + (-90)
-        amp_maps = (sample[3:] + 1) * 25.0 - 90.0
+        amp_maps = (sample[3:] + 1) * 25.0 - 120.0
     else:
         aoa_maps = sample[:3]
         amp_maps = sample[3:]
@@ -116,7 +117,7 @@ def plot_dataset_sample(sample_tensor, sample_idx=0, save_path=None, denormalize
     # Plot Amplitude maps (bottom row)
     for i in range(3):
         ax = axes[1, i]
-        im = ax.imshow(amp_maps[i], cmap='hot', vmin=-90, vmax=-40, origin='lower',
+        im = ax.imshow(amp_maps[i], cmap='hot', vmin=-120, vmax=-40, origin='lower',
                       extent=[0, amp_maps[i].shape[1], 0, amp_maps[i].shape[0]])
         ax.set_title(f'Amplitude Path {i+1} (Strongest → Weakest)', fontsize=11, fontweight='bold')
         ax.set_xlabel('X grid index')
@@ -217,6 +218,10 @@ def main():
                        help='Do not display plots interactively (only save)')
     parser.add_argument('--show_metadata', action='store_true', default=True,
                        help='Show BS position and building locations on plots')
+    parser.add_argument('--random', action='store_true', default=True,
+                       help='Select random samples instead of sequential (default: True)')
+    parser.add_argument('--sequential', action='store_true',
+                       help='Select samples sequentially instead of randomly')
     
     # args = parser.parse_args()
     args, unknown = parser.parse_known_args()
@@ -262,23 +267,26 @@ def main():
     print(f"Visualizing {num_samples} samples...")
     print(f"{'='*70}")
     
-    os.makedirs(args.save_dir, exist_ok=True)
+    # Select sample indices
+    if args.sequential:
+        sample_indices = list(range(num_samples))
+    else:
+        # Random is the default
+        sample_indices = random.sample(range(len(train_dataset)), num_samples)
+        print(f"   Random sample indices: {sample_indices}")
     
-    for i in range(num_samples):
-        print(f"\n📈 Visualizing sample {i+1}/{num_samples}...")
+    for i, idx in enumerate(sample_indices):
+        print(f"\n📈 Visualizing sample {i+1}/{num_samples} (index {idx})...")
         
-        # Get sample with metadata if available
         if has_metadata and args.show_metadata:
-            tensor, metadata = train_dataset.get_sample_with_metadata(i)
+            tensor, metadata = train_dataset.get_sample_with_metadata(idx)
         else:
-            tensor = train_dataset[i]
+            tensor = train_dataset[idx]
             metadata = None
-        
-        save_path = os.path.join(args.save_dir, f"sample_{i:03d}.png")
         
         plot_dataset_sample(
             tensor,
-            sample_idx=i,
+            sample_idx=idx,
             save_path=None,
             denormalize=True,
             show_plot=not args.no_display,
