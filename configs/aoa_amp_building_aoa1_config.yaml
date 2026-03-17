@@ -1,0 +1,69 @@
+# Configuration for first-path (2-channel) training on building data
+# Uses AoA path-1 + amplitude path-1 for ablation against three-path settings.
+
+# Model architecture settings
+image_size: 128
+num_channels: 64
+num_res_blocks: 2
+channel_mult: "1,2,2,4"
+attention_resolutions: "25,50"
+num_heads: 4
+num_head_channels: 16
+use_scale_shift_norm: True
+dropout: 0.1
+resblock_updown: True
+use_checkpoint: False
+use_fp16: False
+use_new_attention_order: False
+model_path: checkpoints/aoa_amp_building_path1/checkpoint_epoch_10.pt
+
+# Data-specific settings
+class_cond: False
+learn_sigma: True
+
+# Channel configuration: first-path AoA + amplitude
+data_channels: 2
+
+# Training settings
+batch_size: 8
+learning_rate: 0.0001
+num_epochs: 500
+save_interval: 2000
+epoch_save_interval: 10
+log_interval: 50
+
+# Dataset settings
+dataset:
+  name: "aoa_amp_building"
+  root: "./data/building_training_randomized"
+  map_size: [128, 128]
+  grid_spacing: 1.0
+  bs_grid_spacing: 4.0
+
+  # Randomized building configurations
+  num_building_sets: 60
+  building_distribution: [20, 20, 20]
+  building_size_range: [[15, 35], [10, 25]]
+  min_building_distance: 5.0
+  seed: 42
+
+  use_existing_data: True
+  normalize_data: True
+
+  # Keep first path pair from [AoA1, AoA2, AoA3, Amp1, Amp2, Amp3]
+  # AoA1 = 0, Amp1 = 3
+  selected_channels: [0, 3]
+
+  # GPU optimization parameters
+  device: 'auto'
+  use_gpu_processing: True
+  batch_size: 32
+  num_workers: 8
+  pin_memory: True
+  prefetch_factor: 2
+
+# DataLoader settings
+dataloader:
+  batch_size: 8
+  num_workers: 2
+  shuffle: True

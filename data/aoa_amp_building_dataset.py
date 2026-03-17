@@ -32,7 +32,8 @@ if REPO_ROOT not in sys.path:
 class AoAAmpBuildingDataset(VisionDataset):
     """
     GPU-optimized dataset for AoA and Amplitude maps generated using ray tracing with buildings.
-    Each sample contains 6 channels: 3 AoA maps + 3 amplitude maps for the strongest paths.
+    Raw samples contain 6 channels: 3 AoA maps + 3 amplitude maps for the strongest paths.
+    A configurable subset of channels can be returned for ablation experiments.
     Buildings are randomized across different configurations.
     """
     
@@ -55,7 +56,8 @@ class AoAAmpBuildingDataset(VisionDataset):
                  num_workers: int = None,
                  pin_memory: bool = True,
                  prefetch_factor: int = 2,
-                 return_index: bool = False):
+                 return_index: bool = False,
+                 selected_channels: Optional[List[int]] = None):
         """
         Args:
             root: Root directory for caching data
@@ -77,6 +79,9 @@ class AoAAmpBuildingDataset(VisionDataset):
             pin_memory: Whether to pin memory for faster GPU transfer
             prefetch_factor: Number of samples loaded in advance by each worker
             return_index: Whether to return the sample index along with the data
+            selected_channels: Optional channel indices to keep from the raw 6-channel tensor.
+                               Channel order is [AoA1, AoA2, AoA3, Amp1, Amp2, Amp3].
+                               Use None to keep all channels.
         """
         super().__init__(root, transforms)
         
@@ -95,6 +100,8 @@ class AoAAmpBuildingDataset(VisionDataset):
         self.pin_memory = pin_memory
         self.prefetch_factor = prefetch_factor
         self.return_index = return_index
+        self.selected_channels = self._validate_selected_channels(selected_channels)
+        self.channel_cache_tag = self._build_channel_cache_tag()
         
         # Setup device
         if device == 'auto':
@@ -111,6 +118,10 @@ class AoAAmpBuildingDataset(VisionDataset):
         print(f"Using device: {self.device}")
         print(f"GPU processing enabled: {self.use_gpu_processing}")
         print(f"Number of workers: {self.num_workers}")
+        if self.selected_channels is None:
+            print("Selected channels: all [0, 1, 2, 3, 4, 5]")
+        else:
+            print(f"Selected channels: {self.selected_channels}")
         
         # Validate building distribution
         if sum(building_distribution) != num_building_sets:
@@ -124,6 +135,39 @@ class AoAAmpBuildingDataset(VisionDataset):
         
         # Prepare data
         self._prepare_data()
+
+    def _validate_selected_channels(self, selected_channels: Optional[List[int]]) -> Optional[List[int]]:
+        """Validate and normalize selected channel indices."""
+        if selected_channels is None:
+            return None
+
+        if not isinstance(selected_channels, (list, tuple)):
+            raise ValueError("selected_channels must be a list or tuple of integers in [0, 5]")
+
+        if len(selected_channels) == 0:
+            raise ValueError("selected_channels cannot be empty")
+
+        normalized_channels = [int(ch) for ch in selected_channels]
+        for ch in normalized_channels:
+            if ch < 0 or ch > 5:
+                raise ValueError(f"Invalid channel index {ch}. Valid range is [0, 5]")
+
+        if len(set(normalized_channels)) != len(normalized_channels):
+            raise ValueError(f"selected_channels contains duplicates: {normalized_channels}")
+
+        return normalized_channels
+
+    def _build_channel_cache_tag(self) -> str:
+        """Build a cache suffix for channel-selection-specific tensor caches."""
+        if self.selected_channels is None:
+            return "all"
+        return "ch_" + "-".join(str(ch) for ch in self.selected_channels)
+
+    def _apply_channel_selection(self, data):
+        """Apply configured channel selection to a tensor/array with channel-first layout."""
+        if self.selected_channels is None:
+            return data
+        return data[self.selected_channels]
     
     def _generate_building_configurations(self) -> List[List[dict]]:
         """Generate randomized building configurations using parallel processing"""
@@ -228,7 +272,10 @@ class AoAAmpBuildingDataset(VisionDataset):
         """Generate or load cached dataset for all building configurations"""
         # Use HDF5 for all data storage instead of pickle
         cache_file = os.path.join(self.root, f'all_building_configs_data_{self.seed}.h5')
-        tensor_cache_file = os.path.join(self.root, f'tensor_data_{self.seed}.h5')
+        if self.channel_cache_tag == 'all':
+            tensor_cache_file = os.path.join(self.root, f'tensor_data_{self.seed}.h5')
+        else:
+            tensor_cache_file = os.path.join(self.root, f'tensor_data_{self.seed}_{self.channel_cache_tag}.h5')
         
         # Fallback files for backward compatibility
         old_pickle_cache = os.path.join(self.root, f'all_building_configs_data_{self.seed}.pkl')
@@ -658,6 +705,8 @@ class AoAAmpBuildingDataset(VisionDataset):
             amp_data = tensor[3:]
             tensor[3:] = 2 * (amp_data - (-90)) / ((-40) - (-90)) - 1
             tensor[3:] = torch.clamp(tensor[3:], -1, 1)
+
+        tensor = self._apply_channel_selection(tensor)
         
         return tensor
         # """Convert single sample to tensor using GPU operations"""
@@ -778,6 +827,8 @@ class AoAAmpBuildingDataset(VisionDataset):
             # Normalize from typical range [-90, -40] to [-1, 1]
             all_maps[3:] = 2 * (amp_data - (-90)) / ((-40) - (-90)) - 1
             all_maps[3:] = np.clip(all_maps[3:], -1, 1)
+
+        all_maps = self._apply_channel_selection(all_maps)
         
         return torch.FloatTensor(all_maps)
     
@@ -819,6 +870,10 @@ class AoAAmpBuildingDataset(VisionDataset):
                 f.attrs['grid_spacing'] = self.grid_spacing
                 f.attrs['normalized'] = self.normalize_data
                 f.attrs['seed'] = self.seed
+                f.attrs['selected_channels'] = (
+                    'all' if self.selected_channels is None
+                    else ','.join(str(ch) for ch in self.selected_channels)
+                )
                 
                 # Save building configurations (as JSON string for HDF5 compatibility)
                 import json
@@ -846,6 +901,10 @@ class AoAAmpBuildingDataset(VisionDataset):
                 grid_spacing=self.grid_spacing,
                 normalized=self.normalize_data,
                 seed=self.seed,
+                selected_channels=np.array(
+                    self.selected_channels if self.selected_channels is not None else [-1],
+                    dtype=np.int16,
+                ),
                 num_samples=len(self.tensor_data)
             )
             
@@ -867,6 +926,9 @@ class AoAAmpBuildingDataset(VisionDataset):
                 'grid_spacing': self.grid_spacing,
                 'normalized': self.normalize_data,
                 'seed': self.seed,
+                'selected_channels': (
+                    self.selected_channels if self.selected_channels is not None else 'all'
+                ),
                 'num_samples': len(self.tensor_data)
             }
         }
@@ -993,10 +1055,10 @@ class AoAAmpBuildingDataset(VisionDataset):
     def __getitem__(self, idx):
         """
         Returns:
-            torch.Tensor or tuple: If return_index=False, returns shape (6, H, W) 
+            torch.Tensor or tuple: If return_index=False, returns shape (C, H, W)
+                                  where C is len(selected_channels) or 6 when using all channels.
                                   If return_index=True, returns (tensor, idx)
-                                  where first 3 channels are AoA maps and 
-                                  last 3 channels are amplitude maps for strongest paths
+                                  Channel order follows selected_channels.
         """
         sample = self.tensor_data[idx]
         
@@ -1016,7 +1078,7 @@ class AoAAmpBuildingDataset(VisionDataset):
         
         Returns:
             tuple: (tensor, metadata) where
-                - tensor: Shape (6, H, W) - the data tensor
+                - tensor: Shape (C, H, W) - the data tensor
                 - metadata: dict with keys:
                     - 'bs_pos': Base station position (x, y)
                     - 'buildings': List of building configurations
