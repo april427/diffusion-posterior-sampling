@@ -186,6 +186,7 @@ class RayTracingAoAMapGPU:
         self.bs_pos = None
         self.buildings = []
         self.building_edges = None
+        self._ranked_maps_cache = None
         
         # Flag for batch processing optimization
         self.building_edges_computed = False
@@ -197,6 +198,7 @@ class RayTracingAoAMapGPU:
     def set_base_station(self, x, y):
         """Set base station position"""
         self.bs_pos = torch.tensor([x, y], dtype=torch.float32, device=self.device)
+        self._ranked_maps_cache = None
         
     def add_building(self, x, y, width, height):
         """
@@ -222,6 +224,7 @@ class RayTracingAoAMapGPU:
             ]
         }
         self.buildings.append(building)
+        self._ranked_maps_cache = None
         
         # Update building edges for vectorized LOS calculation
         self._update_building_edges()
@@ -253,10 +256,277 @@ class RayTracingAoAMapGPU:
         
         # Mark building edges as computed for batch processing optimization
         self.building_edges_computed = True
+
+    def _line_segments_intersect_np(self, p1, p2, p3, p4):
+        """Check if two line segments intersect (NumPy scalar version)."""
+        p1 = np.asarray(p1, dtype=np.float64)
+        p2 = np.asarray(p2, dtype=np.float64)
+        p3 = np.asarray(p3, dtype=np.float64)
+        p4 = np.asarray(p4, dtype=np.float64)
+
+        d = p2 - p1
+        e = p4 - p3
+        denom = d[0] * e[1] - d[1] * e[0]
+        if abs(denom) < 1e-10:
+            return False
+
+        t = ((p3[0] - p1[0]) * e[1] - (p3[1] - p1[1]) * e[0]) / denom
+        u = ((p3[0] - p1[0]) * d[1] - (p3[1] - p1[1]) * d[0]) / denom
+        return 0.0 <= t <= 1.0 and 0.0 <= u <= 1.0
+
+    def _line_intersects_rectangle_np(self, p1, p2, rect):
+        """Check if a line segment intersects a rectangle."""
+        x_min, y_min = rect['x'], rect['y']
+        x_max = x_min + rect['width']
+        y_max = y_min + rect['height']
+
+        edges = [
+            (np.array([x_min, y_min]), np.array([x_max, y_min])),
+            (np.array([x_max, y_min]), np.array([x_max, y_max])),
+            (np.array([x_max, y_max]), np.array([x_min, y_max])),
+            (np.array([x_min, y_max]), np.array([x_min, y_min])),
+        ]
+
+        for edge_start, edge_end in edges:
+            if self._line_segments_intersect_np(p1, p2, edge_start, edge_end):
+                return True
+        return False
+
+    def _is_los_np(self, ue_pos, bs_pos):
+        """Check LoS between BS and UE using rectangle intersections."""
+        for building in self.buildings:
+            if self._line_intersects_rectangle_np(bs_pos, ue_pos, building):
+                return False
+        return True
+
+    def _point_to_segment_distance_np(self, point, seg_start, seg_end):
+        """Distance from point to segment using projection."""
+        seg_vec = seg_end - seg_start
+        seg_len_sq = np.dot(seg_vec, seg_vec)
+        if seg_len_sq < 1e-12:
+            return np.linalg.norm(point - seg_start)
+
+        t = np.dot(point - seg_start, seg_vec) / seg_len_sq
+        t = np.clip(t, 0.0, 1.0)
+        projection = seg_start + t * seg_vec
+        return np.linalg.norm(point - projection)
+
+    def _get_building_walls_np(self, building):
+        """Return rectangle wall segments as (name, start, end)."""
+        x_min, y_min = building['x'], building['y']
+        x_max = x_min + building['width']
+        y_max = y_min + building['height']
+
+        return [
+            ('bottom', np.array([x_min, y_min]), np.array([x_max, y_min])),
+            ('right', np.array([x_max, y_min]), np.array([x_max, y_max])),
+            ('top', np.array([x_max, y_max]), np.array([x_min, y_max])),
+            ('left', np.array([x_min, y_max]), np.array([x_min, y_min])),
+        ]
+
+    def _get_two_closest_walls_np(self, ue_pos, building):
+        """Pick the two wall facets closest to UE for reflection search."""
+        walls = self._get_building_walls_np(building)
+        distances = []
+        for idx, (_, wall_start, wall_end) in enumerate(walls):
+            dist = self._point_to_segment_distance_np(ue_pos, wall_start, wall_end)
+            distances.append((dist, idx))
+
+        distances.sort(key=lambda item: item[0])
+        return [walls[idx] for _, idx in distances[:2]]
+
+    def _reflect_point_across_wall_np(self, point, wall_start, wall_end):
+        """Reflect a point across an axis-aligned wall segment."""
+        if abs(wall_start[0] - wall_end[0]) < 1e-8:  # vertical wall x = c
+            wall_x = wall_start[0]
+            return np.array([2.0 * wall_x - point[0], point[1]])
+
+        if abs(wall_start[1] - wall_end[1]) < 1e-8:  # horizontal wall y = c
+            wall_y = wall_start[1]
+            return np.array([point[0], 2.0 * wall_y - point[1]])
+
+        return None
+
+    def _line_wall_intersection_np(self, line_start, line_end, wall_start, wall_end):
+        """Return line-wall intersection if it lies on both finite segments."""
+        d = line_end - line_start
+        e = wall_end - wall_start
+        denom = d[0] * e[1] - d[1] * e[0]
+
+        if abs(denom) < 1e-10:
+            return None
+
+        delta = wall_start - line_start
+        t = (delta[0] * e[1] - delta[1] * e[0]) / denom
+        u = (delta[0] * d[1] - delta[1] * d[0]) / denom
+
+        if not (0.0 < t < 1.0 and 0.0 <= u <= 1.0):
+            return None
+
+        return line_start + t * d
+
+    def _reflection_candidates_for_ue_np(self, ue_pos, bs_pos):
+        """Generate image-theory reflection candidates from all buildings."""
+        candidates = []
+
+        for building in self.buildings:
+            two_closest_walls = self._get_two_closest_walls_np(ue_pos, building)
+            for _, wall_start, wall_end in two_closest_walls:
+                ue_image = self._reflect_point_across_wall_np(ue_pos, wall_start, wall_end)
+                if ue_image is None:
+                    continue
+
+                reflection_point = self._line_wall_intersection_np(
+                    bs_pos, ue_image, wall_start, wall_end
+                )
+                if reflection_point is None:
+                    continue
+
+                dist_bs_to_refl = np.linalg.norm(reflection_point - bs_pos)
+                dist_refl_to_ue = np.linalg.norm(ue_pos - reflection_point)
+                total_dist = dist_bs_to_refl + dist_refl_to_ue
+                if total_dist < 1e-6:
+                    continue
+
+                path_loss = self.calculate_path_loss_single(total_dist, True) + 6.0
+                amplitude_db = -path_loss
+                vec = reflection_point - bs_pos
+                aoa = np.degrees(np.arctan2(vec[1], vec[0]))
+
+                candidates.append({
+                    'aoa': aoa,
+                    'amplitude_db': amplitude_db,
+                    'distance': total_dist,
+                })
+
+        candidates.sort(key=lambda item: item['amplitude_db'], reverse=True)
+        return candidates
+
+    def _diffraction_candidates_for_ue_np(self, ue_pos, bs_pos):
+        """Generate diffraction candidates from all building corners."""
+        candidates = []
+        for building in self.buildings:
+            for corner in building['corners']:
+                corner = np.array(corner, dtype=np.float64)
+                dist_bs_to_corner = np.linalg.norm(corner - bs_pos)
+                dist_corner_to_ue = np.linalg.norm(ue_pos - corner)
+                total_dist = dist_bs_to_corner + dist_corner_to_ue
+
+                path_loss = self.calculate_path_loss_single(total_dist, True) + 30.0
+                amplitude_db = -path_loss
+                vec = corner - bs_pos
+                aoa = np.degrees(np.arctan2(vec[1], vec[0]))
+
+                candidates.append({
+                    'aoa': aoa,
+                    'amplitude_db': amplitude_db,
+                    'distance': total_dist,
+                })
+
+        candidates.sort(key=lambda item: item['distance'])
+        return candidates
+
+    def _build_ranked_paths_for_ue_np(self, ue_pos, bs_pos, los, num_paths):
+        """Build ranked paths: direct, reflections, then diffraction fallback."""
+        direct_dist = np.linalg.norm(ue_pos - bs_pos)
+        direct_dist = max(direct_dist, 1e-6)
+        direct_amp = -self.calculate_path_loss_single(direct_dist, los)
+        direct_vec = ue_pos - bs_pos
+        direct_aoa = np.degrees(np.arctan2(direct_vec[1], direct_vec[0]))
+
+        ranked_paths = [
+            {
+                'aoa': direct_aoa,
+                'amplitude_db': direct_amp,
+                'distance': direct_dist,
+            }
+        ]
+
+        for candidate in self._reflection_candidates_for_ue_np(ue_pos, bs_pos):
+            if len(ranked_paths) >= num_paths:
+                break
+            ranked_paths.append(candidate)
+
+        if len(ranked_paths) < num_paths:
+            for candidate in self._diffraction_candidates_for_ue_np(ue_pos, bs_pos):
+                if len(ranked_paths) >= num_paths:
+                    break
+                ranked_paths.append(candidate)
+
+        while len(ranked_paths) < num_paths:
+            ranked_paths.append(
+                {
+                    'aoa': direct_aoa,
+                    'amplitude_db': -120.0,
+                    'distance': np.inf,
+                }
+            )
+
+        return ranked_paths
+
+    def _generate_ranked_path_maps_gpu(self, num_paths=3):
+        """Generate AoA/amplitude maps with one shared path assignment."""
+        if self.bs_pos is None:
+            raise ValueError("Base station position not set")
+
+        if (
+            self._ranked_maps_cache is not None
+            and self._ranked_maps_cache['num_paths'] == num_paths
+        ):
+            cached = self._ranked_maps_cache
+            return (
+                [m.copy() for m in cached['aoa_maps']],
+                [m.copy() for m in cached['amplitude_maps']],
+                cached['los_map'].copy(),
+            )
+
+        x_np = self.X.detach().cpu().numpy()
+        y_np = self.Y.detach().cpu().numpy()
+        n_y, n_x = x_np.shape
+        bs_pos = self.bs_pos.detach().cpu().numpy().astype(np.float64)
+
+        if self.building_edges is None:
+            los_map = np.ones((n_y, n_x), dtype=bool)
+        else:
+            los_map = check_los_gpu(
+                self.ue_positions, self.bs_pos, self.building_edges, self.device
+            ).detach().cpu().numpy().astype(bool)
+
+        aoa_maps = [np.zeros((n_y, n_x), dtype=np.float32) for _ in range(num_paths)]
+        amplitude_maps = [np.full((n_y, n_x), -120.0, dtype=np.float32) for _ in range(num_paths)]
+
+        for i in range(n_y):
+            for j in range(n_x):
+                ue_pos = np.array([x_np[i, j], y_np[i, j]], dtype=np.float64)
+                los = bool(los_map[i, j])
+                ranked_paths = self._build_ranked_paths_for_ue_np(ue_pos, bs_pos, los, num_paths)
+                for k, path in enumerate(ranked_paths[:num_paths]):
+                    aoa_maps[k][i, j] = path['aoa']
+                    amplitude_maps[k][i, j] = path['amplitude_db']
+
+        inside_building_mask = np.zeros((n_y, n_x), dtype=bool)
+        for building in self.buildings:
+            x_min, y_min = building['x'], building['y']
+            x_max = x_min + building['width']
+            y_max = y_min + building['height']
+            inside = (x_np >= x_min) & (x_np <= x_max) & (y_np >= y_min) & (y_np <= y_max)
+            inside_building_mask |= inside
+
+        for k in range(num_paths):
+            amplitude_maps[k][inside_building_mask] -= 30.0
+
+        self._ranked_maps_cache = {
+            'num_paths': num_paths,
+            'aoa_maps': [m.copy() for m in aoa_maps],
+            'amplitude_maps': [m.copy() for m in amplitude_maps],
+            'los_map': los_map.copy(),
+        }
+
+        return aoa_maps, amplitude_maps, los_map
     
     def generate_aoa_map_gpu(self, num_paths=3):
         """
-        GPU-accelerated AoA map generation using proper path ranking approach
+        Generate AoA maps for ranked paths.
         
         Parameters:
         -----------
@@ -270,96 +540,12 @@ class RayTracingAoAMapGPU:
         los_map : 2D array
             Boolean map indicating LoS condition
         """
-        if self.bs_pos is None:
-            raise ValueError("Base station position not set")
-        
-        n_y, n_x = self.X.shape
-        total_positions = n_y * n_x
-        
+        aoa_maps, _, los_map = self._generate_ranked_path_maps_gpu(num_paths=num_paths)
+
         if self.verbose:
-            print(f"🔥 TRUE GPU vectorization for {n_y}x{n_x} = {total_positions} positions")
-        
-        # Flatten UE positions for vectorized processing
-        ue_flat = self.ue_positions.reshape(-1, 2)  # Shape: (total_positions, 2)
-        
-        # Calculate LOS for ALL positions at once
-        los_map = check_los_gpu(self.ue_positions, self.bs_pos, self.building_edges, self.device)
-        los_flat = los_map.reshape(-1)  # Flatten to match ue_flat
-        
-        # Calculate ALL direct paths at once
-        direct_aoa = calculate_aoa_gpu(ue_flat.unsqueeze(0), self.bs_pos).squeeze(0)  # Shape: (total_positions,)
-        direct_dist = calculate_distance_gpu(ue_flat.unsqueeze(0), self.bs_pos).squeeze(0)
-        direct_pl = calculate_path_loss_gpu(direct_dist.unsqueeze(0), los_flat.unsqueeze(0), self.device).squeeze(0)
-        direct_amp = -direct_pl
-        
-        # Initialize path storage - we'll collect ALL paths for ALL positions
-        all_paths_aoa = [direct_aoa.unsqueeze(1)]  # List of tensors, each (total_positions, 1)
-        all_paths_amp = [direct_amp.unsqueeze(1)]
-        
-        # Process reflected paths for ALL positions simultaneously
-        for building in self.buildings:
-            refl_points = self._calculate_reflection_points_vectorized(ue_flat, building)  # (total_positions, 2)
-            
-            # Calculate AoA from BS to reflection points
-            refl_vec = refl_points - self.bs_pos.unsqueeze(0)  # (total_positions, 2)
-            refl_aoa = torch.atan2(refl_vec[:, 1], refl_vec[:, 0]) * 180.0 / math.pi  # (total_positions,)
-            
-            # Calculate reflection path distances and amplitudes
-            dist_bs_to_refl = torch.norm(refl_points - self.bs_pos.unsqueeze(0), dim=1)  # (total_positions,)
-            dist_refl_to_ue = torch.norm(ue_flat - refl_points, dim=1)  # (total_positions,)
-            refl_dist = dist_bs_to_refl + dist_refl_to_ue
-            
-            refl_pl = calculate_path_loss_gpu(refl_dist.unsqueeze(0), torch.ones_like(los_flat).unsqueeze(0), self.device).squeeze(0)
-            refl_amp = -refl_pl - 6  # Reflection loss
-            
-            all_paths_aoa.append(refl_aoa.unsqueeze(1))
-            all_paths_amp.append(refl_amp.unsqueeze(1))
-        
-        # Process diffracted paths for ALL positions simultaneously
-        for building in self.buildings:
-            for corner in building['corners']:
-                corner_tensor = torch.tensor(corner, dtype=torch.float32, device=self.device)
-                
-                # Calculate AoA from BS to corner for all UE positions
-                diff_vec = corner_tensor - self.bs_pos  # (2,)
-                diff_aoa = torch.atan2(diff_vec[1], diff_vec[0]) * 180.0 / math.pi  # scalar
-                diff_aoa_all = diff_aoa.repeat(total_positions)  # (total_positions,)
-                
-                # Calculate diffraction path distances
-                dist_bs_to_corner = torch.norm(corner_tensor - self.bs_pos)  # scalar
-                dist_corner_to_ue = torch.norm(ue_flat - corner_tensor.unsqueeze(0), dim=1)  # (total_positions,)
-                diff_dist = dist_bs_to_corner + dist_corner_to_ue
-                
-                diff_pl = calculate_path_loss_gpu(diff_dist.unsqueeze(0), torch.ones_like(los_flat).unsqueeze(0), self.device).squeeze(0)
-                diff_amp = -diff_pl - 30  # Diffraction loss
-                
-                all_paths_aoa.append(diff_aoa_all.unsqueeze(1))
-                all_paths_amp.append(diff_amp.unsqueeze(1))
-        
-        # Stack all paths: (total_positions, num_all_paths)
-        paths_aoa_tensor = torch.cat(all_paths_aoa, dim=1)  # (total_positions, num_all_paths)
-        paths_amp_tensor = torch.cat(all_paths_amp, dim=1)  # (total_positions, num_all_paths)
-        
-        # Sort paths by amplitude for each position (GPU vectorized sorting!)
-        sorted_indices = torch.argsort(paths_amp_tensor, dim=1, descending=True)  # (total_positions, num_all_paths)
-        
-        # Select top paths for each position
-        result_aoa_maps = []
-        for path_idx in range(num_paths):
-            # Get indices for this path rank
-            path_indices = sorted_indices[:, path_idx]  # (total_positions,)
-            
-            # Gather AoA values for this path rank across all positions
-            aoa_values = torch.gather(paths_aoa_tensor, 1, path_indices.unsqueeze(1)).squeeze(1)  # (total_positions,)
-            
-            # Reshape back to map
-            aoa_map = aoa_values.reshape(n_y, n_x)
-            result_aoa_maps.append(aoa_map.cpu().numpy())
-        
-        if self.verbose:
-            print(f"✅ TRUE GPU vectorization completed - processed {total_positions} positions in parallel")
-        
-        return result_aoa_maps, los_map.cpu().numpy()
+            print(f"Generated {len(aoa_maps)} AoA maps using shared ranked path assignment")
+
+        return aoa_maps, los_map
     
     def _calculate_reflection_points_vectorized(self, ue_positions_flat, building):
         """Calculate reflection points for ALL UE positions at once"""
@@ -584,89 +770,15 @@ class RayTracingAoAMapGPU:
     
     def generate_amplitude_map_gpu(self, num_paths=3):
         """
-        GPU-accelerated amplitude map generation
+        Generate amplitude maps for ranked paths.
         
         Returns:
         --------
         amplitude_maps : list of 2D arrays
             Amplitude values for each path in dB
         """
-        if self.bs_pos is None:
-            raise ValueError("Base station position not set")
-        
-        n_y, n_x = self.X.shape
-        
-        if self.verbose:
-            print(f"Generating amplitude maps on GPU for {n_y}x{n_x} grid...")
-        
-        # Calculate LOS map
-        los_map = check_los_gpu(self.ue_positions, self.bs_pos, self.building_edges, self.device)
-        
-        # Calculate distances and path losses
-        distances_direct = calculate_distance_gpu(self.ue_positions, self.bs_pos)
-        path_loss_direct = calculate_path_loss_gpu(distances_direct, los_map, self.device)
-        path_loss_direct[distances_direct < 1e-6] = 50  # if ue is at bs position
+        _, amplitude_maps, _ = self._generate_ranked_path_maps_gpu(num_paths=num_paths)
 
-        
-        # Convert path loss to amplitude (in dB)
-        amplitude_direct = -path_loss_direct  # Received power in dB
-        
-        # Apply 30 dB decrease for UEs inside buildings
-        for building in self.buildings:
-            # Create a mask for UEs inside this building
-            x_min, y_min = building['x'], building['y']
-            x_max = x_min + building['width']
-            y_max = y_min + building['height']
-            
-            # Check if UE positions are inside the building
-            inside_x = (self.X >= x_min) & (self.X <= x_max)
-            inside_y = (self.Y >= y_min) & (self.Y <= y_max)
-            inside_building = inside_x & inside_y
-            
-            # Apply 30 dB decrease to UEs inside the building
-            amplitude_direct[inside_building] -= 30.0  # 30 dB decrease
-        
-        # Store all path amplitudes
-        all_amplitudes = [amplitude_direct]
-        
-        # Add reflected and diffracted path amplitudes
-        for building in self.buildings:
-            building_center = torch.tensor([
-                building['x'] + building['width'] / 2,
-                building['y'] + building['height'] / 2
-            ], dtype=torch.float32, device=self.device)
-            
-            # Reflection amplitude
-            dist_bs_to_building = torch.norm(building_center - self.bs_pos)
-            dist_building_to_ue = calculate_distance_gpu(self.ue_positions, building_center)
-            dist_refl = dist_bs_to_building + dist_building_to_ue
-            
-            path_loss_refl = calculate_path_loss_gpu(dist_refl, torch.ones_like(los_map), self.device)
-            amplitude_refl = -path_loss_refl - 6  # Additional 6dB loss for reflection
-            
-            all_amplitudes.append(amplitude_refl)
-            
-            # Diffraction amplitudes
-            for corner in building['corners']:
-                corner_tensor = torch.tensor(corner, dtype=torch.float32, device=self.device)
-                dist_bs_to_corner = torch.norm(corner_tensor - self.bs_pos)
-                dist_corner_to_ue = calculate_distance_gpu(self.ue_positions, corner_tensor)
-                dist_diff = dist_bs_to_corner + dist_corner_to_ue
-                
-                path_loss_diff = calculate_path_loss_gpu(dist_diff, torch.ones_like(los_map), self.device) + 20
-                amplitude_diff = -path_loss_diff - 10  # Additional 10dB loss for diffraction
-                
-                all_amplitudes.append(amplitude_diff)
-        
-        # Select strongest amplitudes (simplified approach)
-        amplitude_maps = []
-        for path_idx in range(num_paths):
-            if path_idx < len(all_amplitudes):
-                amplitude_maps.append(all_amplitudes[path_idx].cpu().numpy())
-            else:
-                # Fill with very low amplitude if not enough paths
-                amplitude_maps.append(torch.full((n_y, n_x), -120.0, device=self.device).cpu().numpy())
-        
         if self.verbose:
             print(f"Generated {len(amplitude_maps)} amplitude maps")
         return amplitude_maps

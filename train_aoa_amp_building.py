@@ -236,18 +236,18 @@ def main():
     optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
     
     # Generate data if requested
-    # if args.generate_data:
-    #     logger.info("Generating new training data...")
-    #     from aoa_amp_building_data_gpu import generate_building_training_data_gpu_batch
+    if args.generate_data:
+        logger.info("Generating new training data...")
+        from aoa_amp_building_data_gpu import generate_building_training_data_gpu_batch
         
-    #     dataset_config = model_config['dataset']
-    #     generate_building_training_data_gpu_batch(
-    #         map_size=tuple(dataset_config['map_size']),
-    #         grid_spacing=dataset_config['grid_spacing'],
-    #         bs_grid_spacing=dataset_config['bs_grid_spacing'],
-    #         building_configs=dataset_config['building_configs'],
-    #         save_dir=dataset_config['root']
-    #     )
+        dataset_config = model_config['dataset']
+        generate_building_training_data_gpu_batch(
+            map_size=tuple(dataset_config['map_size']),
+            grid_spacing=dataset_config['grid_spacing'],
+            bs_grid_spacing=dataset_config['bs_grid_spacing'],
+            building_configs=dataset_config['building_configs'],
+            save_dir=dataset_config['root']
+        )
     
     # Setup dataset and dataloader
     dataset_config = model_config['dataset']

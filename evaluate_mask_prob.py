@@ -84,7 +84,7 @@ def compute_nmse(reference: torch.Tensor, estimate: torch.Tensor):
 
     mse = torch.mean((est - ref) ** 2)
     denom = torch.mean(ref ** 2)
-    total_nmse = (mse / (denom + 1e-8)).item()
+    total_nmse = (mse / (denom )).item()
 
     per_channel = []
     if ref.dim() == 4:
@@ -93,7 +93,7 @@ def compute_nmse(reference: torch.Tensor, estimate: torch.Tensor):
             est_c = est[:, channel]
             mse_c = torch.mean((est_c - ref_c) ** 2)
             denom_c = torch.mean(ref_c ** 2)
-            per_channel.append((mse_c / (denom_c + 1e-8)).item())
+            per_channel.append((mse_c / (denom_c )).item())
 
     return total_nmse, per_channel
 
