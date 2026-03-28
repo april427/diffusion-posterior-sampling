@@ -39,32 +39,50 @@ For CPU-only machines, install the CPU wheels instead of the CUDA packages.
 
 ```
 configs/
-  aoa_amp_config.yaml       # UNet & training hyperparameters
-  diffusion_config.yaml     # beta schedule, sampler type, #steps
-  train_dps_config.yaml     # dataset, batch size, optimizer, logging
+  aoa_amp_building_config.yaml      # UNet & training hyperparameters
+  aoa_amp_building_inpainting.yaml  # inpainting task config
+  diffusion_config.yaml             # beta schedule, sampler type, #steps
 data/
-  aoa_amp_cache/            # cached AoA/Amp tensors (auto generated)
-guided_diffusion/           # diffusion implementation (DDPM/DDIM)
+  aoa_amp_building_dataset.py       # dataset class (AoAAmpBuildingDataset)
+  building_training_randomized/     # ray-traced AoA/Amp data with buildings
+guided_diffusion/                   # diffusion implementation (DDPM/DDIM)
 scripts/
-  train_aoa_amp.sh          # one-click training script
-  run_sampling.sh           # conditional inpainting demo
-sample_condition.py         # posterior sampling + utilities
-train_dps.py                # training loop (AoA adaptation)
+  train_aoa_amp_building.sh         # one-click training script
+  run_sampling_building.sh          # conditional inpainting demo
+sample_condition_building.py        # posterior sampling + utilities
+train_aoa_amp_building.py           # training loop
 ```
 
 ---
 
-## 3. Dataset Generation
+## 3. Dataset
 
-`AoAAmpDataset` procedurally generates AoA/amplitude grids and caches them in `data/aoa_amp_cache`. The cache filename is determined by `num_samples`, `num_bs`, and `grid_resolution`, e.g.
-```
-aoa_amp_cache_<num_samples>_<num_bs>_<grid_resolution>.pkl
-```
-If the cache for a configuration already exists, it is reused; otherwise it is regenerated automatically.
+`AoAAmpBuildingDataset` (in `data/aoa_amp_building_dataset.py`) loads ray-traced AoA/amplitude maps from `data/building_training_randomized/`. Each sample contains 6 channels (3 AoA + 3 amplitude maps for the strongest paths) across randomized building configurations.
+
+Dataset parameters are controlled in `configs/aoa_amp_building_config.yaml` under the `dataset` key:
+- `map_size`: spatial resolution (default 128×128)
+- `num_building_sets`: number of randomized building layouts (default 60)
+- `building_distribution`: how many configs for 1, 2, 3 buildings (default `[20, 20, 20]`)
+- `use_existing_data`: reuse pre-generated data if available
 
 Key normalization:
 - AoA: divided by π to map `[-π, π] → [-1, 1]`
 - Amplitude: percentile scaling to `[-1, 1]`
+
+### Data generation & ray-tracing files
+
+There are several related files for data generation. Here is what each one does and how they relate:
+
+| File | Role | Description |
+|------|------|-------------|
+| `aoa_amp_building.py` | **CPU ray tracer** | Core `RayTracingAoAMap` class — pure NumPy implementation of the 2-D ray tracing engine (LOS, reflections, building occlusion). |
+| `aoa_amp_building_gpu.py` | **GPU ray tracer** | `RayTracingAoAMapGPU` — PyTorch reimplementation of the same ray tracer with CUDA / MPS acceleration. |
+| `aoa_amp_building_data.py` | **CPU data generator** | Calls `RayTracingAoAMap` to sweep BS positions over a grid and produce per-sample pickle files. Original single-threaded version. |
+| `aoa_amp_building_data_optimized.py` | **CPU data generator (parallel)** | Same logic as above but with `ProcessPoolExecutor` parallelism for faster generation. |
+| `aoa_amp_building_data_gpu.py` | **GPU data generator** | Calls `RayTracingAoAMapGPU` to generate samples on GPU, with batch processing and optional HDF5 output. |
+| `data/aoa_amp_building_dataset.py` | **PyTorch Dataset (used in training & sampling)** | `AoAAmpBuildingDataset` — the only file imported by the training and sampling scripts. Loads pre-generated data from `data/building_training_randomized/`. When data doesn't exist yet, it dispatches to one of the generators above with a fallback chain: GPU generator → optimized CPU → basic CPU. |
+
+**In practice**, only `data/aoa_amp_building_dataset.py` is called directly. The data generation files (`aoa_amp_building_data*.py`) and ray tracer files (`aoa_amp_building*.py`) are invoked behind the scenes when `use_existing_data` is `False` or no cached data is found.
 
 ---
 
@@ -100,27 +118,27 @@ Checkpoints and TensorBoard logs are written under `./checkpoints/aoa_amp_dps` a
 Generate AoA/amplitude reconstructions conditioned on masked observations via:
 
 ```bash
-bash scripts/run_sampling.sh
+bash scripts/run_sampling_building.sh
 ```
 
 The script executes:
 
 ```bash
-python sample_condition.py \
-  --model_config configs/aoa_amp_config.yaml \
+python3 sample_condition_building.py \
+  --model_config configs/aoa_amp_building_config.yaml \
   --diffusion_config configs/diffusion_config.yaml \
-  --task_config configs/aoa_inpainting_config.yaml \
+  --task_config configs/aoa_amp_building_inpainting.yaml \
   --gpu 0 \
-  --save_dir ./results/aoa_inpainting
+  --save_dir ./results/aoa_amp_building
 ```
 
 Outputs:
 - `input/`, `label/`, `recon/` directories (one subdir per operator, e.g. `inpainting/`).
-- Channel visualisations (`*_channel1.png`, `*_channel2.png`) using HSV colormap.
+- Channel visualisations (`*_channel1.pdf`, `*_channel2.pdf`, etc.) for all 6 channels.
 - Raw tensors (`*.npy`) in training scale `[-1, 1]`.
 - AoA values restored to radians (`*_aoa_rad.npy`).
 
-You may edit `aoa_inpainting_config.yaml` to change mask distribution (`mask_opt`) or conditioning strength (`conditioning.params.scale`).
+You may edit `aoa_amp_building_inpainting.yaml` to change mask distribution (`mask_opt`) or conditioning strength (`conditioning.params.scale`).
 
 ---
 
@@ -130,8 +148,8 @@ You may edit `aoa_inpainting_config.yaml` to change mask distribution (`mask_opt
 
 ```bash
 python quick_sample_debug.py \
-  --checkpoint checkpoints/aoa_amp_dps/checkpoint_epoch_200.pt \
-  --output checkpoints/aoa_amp_dps/quick_sample.npy \
+  --checkpoint checkpoints/aoa_amp_building/checkpoint_epoch_10.pt \
+  --output checkpoints/aoa_amp_building/quick_sample.npy \
   --num_samples 4 \
   --gpu 0
 ```
