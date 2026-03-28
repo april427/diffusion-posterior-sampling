@@ -105,7 +105,12 @@ class AoAAmpBuildingDataset(VisionDataset):
         
         # Setup device
         if device == 'auto':
-            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            if torch.backends.mps.is_available():
+                self.device = torch.device('mps')
+            elif torch.cuda.is_available():
+                self.device = torch.device('cuda')
+            else:
+                self.device = torch.device('cpu')
         else:
             self.device = torch.device(device)
         
@@ -114,6 +119,10 @@ class AoAAmpBuildingDataset(VisionDataset):
             self.num_workers = min(8, mp.cpu_count())
         else:
             self.num_workers = num_workers
+        
+        # MPS does not support concurrent GPU access from multiple threads
+        if self.device.type == 'mps':
+            self.num_workers = 0
         
         print(f"Using device: {self.device}")
         print(f"GPU processing enabled: {self.use_gpu_processing}")
@@ -537,7 +546,7 @@ class AoAAmpBuildingDataset(VisionDataset):
         show_progress = (config_idx < 3) or (config_idx % 10 == 0)
         
         # Try to use GPU-accelerated version if available and requested
-        if self.use_gpu_processing and self.device.type == 'cuda':
+        if self.use_gpu_processing and self.device.type in ('cuda', 'mps'):
             try:
                 from aoa_amp_building_data_gpu import generate_building_training_data_gpu_batch
                 # if show_progress:
@@ -618,7 +627,7 @@ class AoAAmpBuildingDataset(VisionDataset):
         """Convert data to tensors using GPU acceleration"""
         print("\n🔄 Converting data to tensor format...")
         
-        if self.use_gpu_processing and self.device.type == 'cuda':
+        if self.use_gpu_processing and self.device.type in ('cuda', 'mps'):
             self._convert_with_gpu_batching()
         else:
             self._convert_with_cpu_batching()

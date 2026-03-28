@@ -337,7 +337,7 @@ def generate_building_training_data_gpu_batch(map_size=(128, 128), grid_spacing=
     
     # Set number of workers
     if num_workers is None:
-        if device == 'cuda':
+        if str(device) in ('cuda', 'mps'):
             num_workers = 1  # GPU works best with fewer processes
         else:
             num_workers = min(mp.cpu_count() // 2, 4)
@@ -368,7 +368,8 @@ def generate_building_training_data_gpu_batch(map_size=(128, 128), grid_spacing=
     dataset = []
     start_time = time.time()
     
-    if device == 'cuda' and torch.cuda.is_available():
+    device_str = str(device)
+    if device_str in ('cuda', 'mps'):
         
         # Use the optimized batch processing
         for i in range(0, total_samples, batch_size):

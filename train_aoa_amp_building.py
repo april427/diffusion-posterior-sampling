@@ -173,7 +173,7 @@ def main():
                        help='GPU device to use')
     parser.add_argument('--log_dir', type=str, default='./logs/aoa_amp_building',
                        help='Directory for tensorboard logs')
-    parser.add_argument('--generate_data', action='store_true',
+    parser.add_argument('--generate_data', action='store_true', default=False,
                        help='Generate new training data before training')
     
     args = parser.parse_args()
@@ -235,22 +235,13 @@ def main():
     # Setup optimizer
     optimizer = AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
     
-    # Generate data if requested
-    if args.generate_data:
-        logger.info("Generating new training data...")
-        from aoa_amp_building_data_gpu import generate_building_training_data_gpu_batch
-        
-        dataset_config = model_config['dataset']
-        generate_building_training_data_gpu_batch(
-            map_size=tuple(dataset_config['map_size']),
-            grid_spacing=dataset_config['grid_spacing'],
-            bs_grid_spacing=dataset_config['bs_grid_spacing'],
-            building_configs=dataset_config['building_configs'],
-            save_dir=dataset_config['root']
-        )
-    
     # Setup dataset and dataloader
     dataset_config = model_config['dataset']
+    
+    # If --generate_data is set, force regeneration by disabling cached data
+    if args.generate_data:
+        logger.info("Forcing regeneration of training data...")
+        dataset_config['use_existing_data'] = False
     dataloader_config = model_config.get('dataloader', {})
     
     full_dataset = get_dataset(**dataset_config)
