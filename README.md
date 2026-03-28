@@ -84,6 +84,11 @@ There are several related files for data generation. Here is what each one does 
 
 **In practice**, only `data/aoa_amp_building_dataset.py` is called directly. The data generation files (`aoa_amp_building_data*.py`) and ray tracer files (`aoa_amp_building*.py`) are invoked behind the scenes when `use_existing_data` is `False` or no cached data is found.
 
+### Test dataset
+`plot_test_dataset.py` Plot a dataset with 6 channels by set builings and one BS location
+
+`visualize_dataset.py` Load the generated dataset and plot 3 datasets with 1, 2, and 3 buildings 
+
 ---
 
 ## 4. Training
