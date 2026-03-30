@@ -472,8 +472,15 @@ class AoAAmpBuildingDataset(VisionDataset):
         # Create tasks for parallel data generation
         tasks = [(i, config) for i, config in enumerate(self.building_config_sets)]
         
+        # GPU works best with sequential configs (avoid thread contention on one device)
+        # and larger inner batches; multi-threading only helps for CPU generation.
+        if self.device.type in ('cuda', 'mps'):
+            gen_workers = 1
+        else:
+            gen_workers = self.num_workers
+
         print(f"\n🏗️  Generating training data for {len(tasks)} building configurations...")
-        print(f"⚙️  Using {self.num_workers} workers on {self.device}")
+        print(f"⚙️  Using {gen_workers} workers on {self.device}")
         
         # Create a progress bar for configurations
         config_progress = tqdm(
@@ -496,8 +503,8 @@ class AoAAmpBuildingDataset(VisionDataset):
             config_progress.set_postfix_str(f"Config {completed_configs}/{len(tasks)}")
         
         # Use ThreadPoolExecutor for I/O bound operations or sequential processing
-        if self.num_workers > 0:
-            with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+        if gen_workers > 0:
+            with ThreadPoolExecutor(max_workers=gen_workers) as executor:
                 # Submit all tasks and add progress callback
                 futures = []
                 for task in tasks:
@@ -559,7 +566,7 @@ class AoAAmpBuildingDataset(VisionDataset):
                     building_configs=building_config,
                     save_dir=None,  # Don't save individual configs to disk
                     device=str(self.device),
-                    batch_size=min(8, self.batch_size),  # Smaller batches for GPU
+                    batch_size=64,  # Larger batches to saturate GPU
                     num_workers=1,  # Single worker per config to avoid nested parallelism
                     progress_callback=None  # Disable inner progress for cleaner output
                 )
