@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.tensorboard import SummaryWriter
 import os
+import glob
 import logging
 from tqdm import tqdm
 import numpy as np
@@ -43,9 +44,9 @@ def save_checkpoint(model, optimizer, step, loss, checkpoint_dir, filename="chec
     print(f"Checkpoint saved to {filepath}")
 
 
-def load_checkpoint(model, optimizer, checkpoint_path):
+def load_checkpoint(model, optimizer, checkpoint_path, map_location=None):
     """Load model checkpoint"""
-    checkpoint = torch.load(checkpoint_path)
+    checkpoint = torch.load(checkpoint_path, map_location=map_location)
     
     # Handle different checkpoint formats
     if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
@@ -167,8 +168,8 @@ def main():
                        help='Path to diffusion configuration file')
     parser.add_argument('--checkpoint_dir', type=str, default='./checkpoints/aoa_amp_building',
                        help='Directory to save checkpoints')
-    parser.add_argument('--resume', type=str, default=None,
-                       help='Path to checkpoint to resume from')
+    parser.add_argument('--resume', type=str, default='',
+                       help='Path to checkpoint to resume from, or "latest" to auto-find latest checkpoint')
     parser.add_argument('--gpu', type=int, default=0,
                        help='GPU device to use')
     parser.add_argument('--log_dir', type=str, default='./logs/aoa_amp_building',
@@ -307,7 +308,18 @@ def main():
     # Resume from checkpoint if specified
     start_step = 0
     if args.resume:
-        start_step, _ = load_checkpoint(model, optimizer, args.resume)
+        resume_path = args.resume
+        if resume_path == 'latest' or not os.path.isfile(resume_path):
+            # Find latest checkpoint in checkpoint_dir
+            ckpt_files = sorted(glob.glob(os.path.join(args.checkpoint_dir, '*.pt')))
+            if ckpt_files:
+                resume_path = ckpt_files[-1]
+                logger.info(f"Found latest checkpoint: {resume_path}")
+            else:
+                logger.info("No checkpoint found to resume from. Starting from scratch.")
+                resume_path = None
+        if resume_path:
+            start_step, _ = load_checkpoint(model, optimizer, resume_path, map_location=device)
     
     # Training loop
     logger.info("Starting training...")

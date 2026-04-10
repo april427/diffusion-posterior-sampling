@@ -490,7 +490,7 @@ def betas_for_alpha_bar(num_diffusion_timesteps, alpha_bar, max_beta=0.999):
 # ================
 
 def extract_and_expand(array, time, target):
-    array = torch.from_numpy(array).to(target.device)[time].float()
+    array = torch.from_numpy(array).to(dtype=target.dtype).to(device=target.device)[time]
     while array.ndim < target.ndim:
         array = array.unsqueeze(-1)
     return array.expand_as(target)
@@ -518,7 +518,7 @@ def _extract_into_tensor(arr, timesteps, broadcast_shape):
                             dimension equal to the length of timesteps.
     :return: a tensor of shape [batch_size, 1, ...] where the shape has K dims.
     """
-    res = torch.from_numpy(arr).to(device=timesteps.device)[timesteps].float()
+    res = torch.from_numpy(arr).to(dtype=torch.float32).to(device=timesteps.device)[timesteps]
     while len(res.shape) < len(broadcast_shape):
         res = res[..., None]
     return res.expand(broadcast_shape)

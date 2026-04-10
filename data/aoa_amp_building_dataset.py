@@ -102,6 +102,8 @@ class AoAAmpBuildingDataset(VisionDataset):
         self.return_index = return_index
         self.selected_channels = self._validate_selected_channels(selected_channels)
         self.channel_cache_tag = self._build_channel_cache_tag()
+        # Keep full dynamic range after affine normalization.
+        self.amplitude_post_clip = False
         
         # Setup device
         if device == 'auto':
@@ -296,8 +298,13 @@ class AoAAmpBuildingDataset(VisionDataset):
                 
                 # Try to load pre-converted tensor data
                 if os.path.exists(tensor_cache_file):
-                    print(f"Loading pre-converted tensor data from HDF5: {tensor_cache_file}...")
-                    self.tensor_data = self._load_tensor_cache(tensor_cache_file)
+                    if self._is_tensor_cache_compatible(tensor_cache_file):
+                        print(f"Loading pre-converted tensor data from HDF5: {tensor_cache_file}...")
+                        self.tensor_data = self._load_tensor_cache(tensor_cache_file)
+                    else:
+                        print("⚠️  Tensor cache is incompatible with current normalization settings; rebuilding...")
+                        self._convert_to_tensors_gpu()
+                        self._save_tensor_cache(tensor_cache_file)
                 else:
                     self._convert_to_tensors_gpu()
                     self._save_tensor_cache(tensor_cache_file)
@@ -720,7 +727,6 @@ class AoAAmpBuildingDataset(VisionDataset):
             # Amplitude is in dB, typically ranging from -90 to -40 dB
             amp_data = tensor[3:]
             tensor[3:] = 2 * (amp_data - (-90)) / ((-40) - (-90)) - 1
-            tensor[3:] = torch.clamp(tensor[3:], -1, 1)
 
         tensor = self._apply_channel_selection(tensor)
         
@@ -842,7 +848,6 @@ class AoAAmpBuildingDataset(VisionDataset):
             amp_data = all_maps[3:]
             # Normalize from typical range [-90, -40] to [-1, 1]
             all_maps[3:] = 2 * (amp_data - (-90)) / ((-40) - (-90)) - 1
-            all_maps[3:] = np.clip(all_maps[3:], -1, 1)
 
         all_maps = self._apply_channel_selection(all_maps)
         
@@ -885,6 +890,7 @@ class AoAAmpBuildingDataset(VisionDataset):
                 f.attrs['map_size'] = self.map_size
                 f.attrs['grid_spacing'] = self.grid_spacing
                 f.attrs['normalized'] = self.normalize_data
+                f.attrs['amplitude_post_clip'] = self.amplitude_post_clip
                 f.attrs['seed'] = self.seed
                 f.attrs['selected_channels'] = (
                     'all' if self.selected_channels is None
@@ -916,6 +922,7 @@ class AoAAmpBuildingDataset(VisionDataset):
                 map_size=self.map_size,
                 grid_spacing=self.grid_spacing,
                 normalized=self.normalize_data,
+                amplitude_post_clip=np.int8(self.amplitude_post_clip),
                 seed=self.seed,
                 selected_channels=np.array(
                     self.selected_channels if self.selected_channels is not None else [-1],
@@ -941,6 +948,7 @@ class AoAAmpBuildingDataset(VisionDataset):
                 'map_size': self.map_size,
                 'grid_spacing': self.grid_spacing,
                 'normalized': self.normalize_data,
+                'amplitude_post_clip': self.amplitude_post_clip,
                 'seed': self.seed,
                 'selected_channels': (
                     self.selected_channels if self.selected_channels is not None else 'all'
@@ -962,6 +970,86 @@ class AoAAmpBuildingDataset(VisionDataset):
             return self._load_from_npz(cache_file)
         else:  # PyTorch format
             return self._load_from_pytorch(cache_file)
+
+    @staticmethod
+    def _as_bool(value):
+        """Best-effort cast of metadata values to bool."""
+        if value is None:
+            return None
+        if isinstance(value, (bool, np.bool_)):
+            return bool(value)
+        if isinstance(value, (int, np.integer)):
+            return bool(int(value))
+        if isinstance(value, bytes):
+            value = value.decode('utf-8', errors='ignore')
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {'1', 'true', 'yes', 'y', 'on'}:
+                return True
+            if normalized in {'0', 'false', 'no', 'n', 'off'}:
+                return False
+        return None
+
+    def _read_tensor_cache_metadata(self, cache_file):
+        """Read metadata fields from a tensor cache without loading full tensors."""
+        file_ext = os.path.splitext(cache_file)[1].lower()
+        metadata = {}
+
+        try:
+            if file_ext == '.h5' or file_ext == '.hdf5':
+                import h5py
+                with h5py.File(cache_file, 'r') as f:
+                    metadata['normalized'] = f.attrs.get('normalized', None)
+                    metadata['amplitude_post_clip'] = f.attrs.get('amplitude_post_clip', None)
+                return metadata
+
+            if file_ext == '.npz':
+                npz_data = np.load(cache_file)
+                metadata['normalized'] = npz_data['normalized'].item() if 'normalized' in npz_data else None
+                metadata['amplitude_post_clip'] = (
+                    npz_data['amplitude_post_clip'].item() if 'amplitude_post_clip' in npz_data else None
+                )
+                return metadata
+
+            saved_data = torch.load(cache_file, map_location='cpu')
+            if isinstance(saved_data, dict):
+                cached_meta = saved_data.get('metadata', {})
+                metadata['normalized'] = cached_meta.get('normalized', None)
+                metadata['amplitude_post_clip'] = cached_meta.get('amplitude_post_clip', None)
+            return metadata
+        except Exception as exc:
+            print(f"⚠️  Failed to read tensor cache metadata from {cache_file}: {exc}")
+            return None
+
+    def _is_tensor_cache_compatible(self, cache_file):
+        """Check whether cached tensors match current normalization semantics."""
+        metadata = self._read_tensor_cache_metadata(cache_file)
+        if metadata is None:
+            return False
+
+        cached_normalized = self._as_bool(metadata.get('normalized'))
+        expected_normalized = bool(self.normalize_data)
+        if cached_normalized is not None and cached_normalized != expected_normalized:
+            print(
+                f"⚠️  Tensor cache normalized={cached_normalized} but expected "
+                f"normalized={expected_normalized}"
+            )
+            return False
+
+        if expected_normalized:
+            cached_amp_clip = self._as_bool(metadata.get('amplitude_post_clip'))
+            # Legacy caches did not persist this field and were created with clipping enabled.
+            if cached_amp_clip is None:
+                cached_amp_clip = True
+
+            if cached_amp_clip != bool(self.amplitude_post_clip):
+                print(
+                    f"⚠️  Tensor cache amplitude_post_clip={cached_amp_clip} but expected "
+                    f"amplitude_post_clip={self.amplitude_post_clip}"
+                )
+                return False
+
+        return True
     
     def _load_from_hdf5(self, cache_file):
         """Load tensor data from HDF5 format"""

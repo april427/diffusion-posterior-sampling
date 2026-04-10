@@ -246,7 +246,7 @@ class LearnedRangeVarianceProcessor(VarianceProcessor):
 # ================
 
 def extract_and_expand(array, time, target):
-    array = torch.from_numpy(array).to(target.device)[time].float()
+    array = torch.from_numpy(array).float().to(target.device)[time]
     while array.ndim < target.ndim:
         array = array.unsqueeze(-1)
     return array.expand_as(target)

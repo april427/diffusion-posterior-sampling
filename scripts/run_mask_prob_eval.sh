@@ -10,12 +10,22 @@ NUM_TEST_SAMPLES=2
 SEED=42
 SAVE_DIR="./results/noise_sigma_eval"
 
-# Define GPUs and noise sigmas
-GPUS=(0)  # Adjust to your available GPUs, e.g., GPUS=(0 1 2 3)
-ALL_NOISE_SIGMAS=(0.562 0.316 0.178 0.1 0.05)
+# Detect device type (cuda, mps, or cpu)
+if python3 -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
+    DEVICE_TYPE="cuda"
+elif python3 -c "import torch; assert torch.backends.mps.is_available()" 2>/dev/null; then
+    DEVICE_TYPE="mps"
+else
+    DEVICE_TYPE="cpu"
+fi
 
-# Fixed mask probability
-MASK_PROB=0.8
+# Define GPUs and noise sigmas
+GPUS=(0)  # Adjust to your available GPUs (CUDA only), e.g., GPUS=(0 1 2 3)
+# ALL_NOISE_SIGMAS=(0.562 0.316 0.178 0.1 0.05)
+ALL_NOISE_SIGMAS=(0.05)
+
+# Fixed mask probability (comma-separated string for Python)
+MASK_PROB="0.75,0.8,0.85,0.9,0.95"
 
 # Set to true to load full dataset with metadata (uses more memory)
 # By default, tensor-only mode is used (lighter memory, avoids CUDA OOM)
@@ -24,6 +34,7 @@ FULL_DATASET=false
 echo "=============================================="
 echo "Multi-GPU Noise Sigma Evaluation"
 echo "=============================================="
+echo "Device type: ${DEVICE_TYPE}"
 echo "Using GPUs: ${GPUS[*]}"
 echo "Noise sigmas: ${ALL_NOISE_SIGMAS[*]}"
 echo "Fixed mask probability: ${MASK_PROB}"
@@ -46,6 +57,7 @@ run_on_gpu() {
         --model_config ${MODEL_CONFIG} \
         --diffusion_config ${DIFFUSION_CONFIG} \
         --task_config ${TASK_CONFIG} \
+        --device ${DEVICE_TYPE} \
         --gpu ${gpu} \
         --num_test_samples ${NUM_TEST_SAMPLES} \
         --mask_probs ${MASK_PROB} \

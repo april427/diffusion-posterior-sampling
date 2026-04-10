@@ -56,8 +56,21 @@ class TensorOnlyDataset(Dataset):
     def _load_tensor_cache(self, cache_file):
         """Load pre-converted tensor data from HDF5"""
         import h5py
-        
+
         with h5py.File(cache_file, 'r') as f:
+            normalized = f.attrs.get('normalized', True)
+            amp_post_clip = f.attrs.get('amplitude_post_clip', None)
+
+            if bool(normalized):
+                # Legacy caches did not include amplitude_post_clip and were clipped.
+                if amp_post_clip is None or bool(amp_post_clip):
+                    raise ValueError(
+                        f"Incompatible tensor cache detected: {cache_file}\n"
+                        "This cache was generated with post-normalization amplitude clipping.\n"
+                        "Regenerate tensor_data_*.h5 with the updated dataset pipeline "
+                        "(amplitude_post_clip=False)."
+                    )
+
             tensor_data = torch.from_numpy(f['tensor_data'][:]).float()
         
         return tensor_data
@@ -127,6 +140,9 @@ def evaluate_single_config(
     # Set seed for reproducible masks
     torch.manual_seed(seed)
     np.random.seed(seed)
+
+    if not hasattr(evaluate_single_config, "_debug_print_done"):
+        evaluate_single_config._debug_print_done = False
     
     nmse_totals = []
     channel_nmse_records = defaultdict(list)
@@ -161,6 +177,38 @@ def evaluate_single_config(
         # Sampling - requires_grad for DPS conditioning
         x_start = torch.randn(ref_img.shape, device=device).requires_grad_()
         sample = sample_fn(x_start=x_start, measurement=y_n, record=False, save_root=None)
+
+        if not evaluate_single_config._debug_print_done:
+            ref0 = ref_img[0].detach().cpu()
+            sample0 = sample[0].detach().cpu()
+            channel_names = ["aoa_1", "aoa_2", "aoa_3", "amp_1", "amp_2", "amp_3"]
+            height, width = ref0.shape[-2], ref0.shape[-1]
+            patch_h = min(10, height)
+            patch_w = min(10, width)
+            h_start = max((height - patch_h) // 2, 0)
+            w_start = max((width - patch_w) // 2, 0)
+            h_end = h_start + patch_h
+            w_end = w_start + patch_w
+
+            logger.info("===== DEBUG: first image channel dump =====")
+            logger.info("ref_img[0] shape: %s", tuple(ref0.shape))
+            logger.info("sample[0] shape: %s", tuple(sample0.shape))
+            logger.info(
+                "Center patch indices: h[%d:%d], w[%d:%d] (size=%dx%d)",
+                h_start, h_end, w_start, w_end, patch_h, patch_w
+            )
+            for c_idx in range(ref0.shape[0]):
+                channel_name = channel_names[c_idx] if c_idx < len(channel_names) else f"channel_{c_idx}"
+                ref_patch = ref0[c_idx, h_start:h_end, w_start:w_end].numpy()
+                sample_patch = sample0[c_idx, h_start:h_end, w_start:w_end].numpy()
+                ref_str = np.array2string(ref_patch, precision=6, suppress_small=False, max_line_width=200)
+                sample_str = np.array2string(sample_patch, precision=6, suppress_small=False, max_line_width=200)
+                logger.info("[%s] ref_img[0, %d] center %dx%d:\n%s", channel_name, c_idx, patch_h, patch_w, ref_str)
+                logger.info("[%s] sample[0, %d] center %dx%d:\n%s", channel_name, c_idx, patch_h, patch_w, sample_str)
+            logger.info("===== END DEBUG DUMP =====")
+            evaluate_single_config._debug_print_done = True
+            logger.info("Debug dump complete for one image. Terminating run by design.")
+            raise SystemExit(0)
         
         # Compute NMSE
         total_nmse, per_channel_nmse = compute_nmse(ref_img, sample)
@@ -169,7 +217,10 @@ def evaluate_single_config(
             channel_nmse_records[c_idx].append(value)
         
         # Clear GPU memory
-        torch.cuda.empty_cache()
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+        elif device.type == 'mps':
+            torch.mps.empty_cache()
     
     # Calculate statistics
     results = {
@@ -379,15 +430,18 @@ def plot_grid_results(all_results, save_dir, mask_probs, noise_sigmas, channel_n
 
 def main():
     parser = argparse.ArgumentParser(description='Evaluate NMSE vs Mask Probability and/or Noise Sigma')
-    parser.add_argument('--model_config', required=True, help='Path to model config')
-    parser.add_argument('--diffusion_config', required=True, help='Path to diffusion config')
-    parser.add_argument('--task_config', required=True, help='Path to task config')
-    parser.add_argument('--gpu', type=int, default=0, help='GPU device ID')
+    parser.add_argument('--model_config', required=True, default =  "configs/aoa_amp_building_config.yaml", help='Path to model config')
+    parser.add_argument('--diffusion_config', required=True, default = "configs/diffusion_config.yaml", help='Path to diffusion config')
+    parser.add_argument('--task_config', required=True, default="configs/aoa_amp_building_inpainting.yaml", help='Path to task config')
+    parser.add_argument('--gpu', type=int, default=0, help='GPU device ID (CUDA only)')
+    parser.add_argument('--device', type=str, default=None,
+                        choices=['cuda', 'mps', 'cpu'],
+                        help='Device type (auto-detected if not specified)')
     parser.add_argument('--save_dir', type=str, default='./results/mask_prob_eval', help='Output directory')
-    parser.add_argument('--num_test_samples', type=int, default=10, help='Number of test samples')
-    parser.add_argument('--mask_probs', type=str, default='0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9',
+    parser.add_argument('--num_test_samples', type=int, default=2, help='Number of test samples')
+    parser.add_argument('--mask_probs', type=str, default='0.75,0.8,0.85, 0.9, 0.95',
                         help='Comma-separated mask probabilities to evaluate')
-    parser.add_argument('--noise_sigmas', type=str, default=None,
+    parser.add_argument('--noise_sigmas', type=str, default = 0.05,
                         help='Comma-separated noise sigma values to evaluate (default: use task_config value)')
     parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     parser.add_argument('--full_dataset', action='store_true',
@@ -399,7 +453,17 @@ def main():
     
     # Setup
     logger = get_logger()
-    device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else 'cpu')
+    if args.device:
+        if args.device == 'cuda':
+            device = torch.device(f"cuda:{args.gpu}")
+        else:
+            device = torch.device(args.device)
+    elif torch.cuda.is_available():
+        device = torch.device(f"cuda:{args.gpu}")
+    elif torch.backends.mps.is_available():
+        device = torch.device('mps')
+    else:
+        device = torch.device('cpu')
     logger.info(f"Device: {device}")
     
     # Create output directory
